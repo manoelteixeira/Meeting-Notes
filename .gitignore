@@ -1,0 +1,13 @@
+.build/
+Resources/AppIcon.icns
+build/
+Resources/AppIcon.icns
+.swiftpm/
+.omc/
+Tests/Fixtures/*.m4a
+Tests/Fixtures/*.aiff
+Tests/Fixtures/*.wav
+.DS_Store
+
+# Coverage data dropped by test runs.
+default.profraw

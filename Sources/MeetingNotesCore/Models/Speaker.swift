@@ -1,0 +1,21 @@
+import Foundation
+
+/// A speaker discovered by diarization. `id` is the diarizer's cluster label and
+/// is stable for the meeting; `displayName` is user-editable.
+public struct Speaker: Codable, Sendable, Equatable, Hashable, Identifiable {
+    /// Label used when no diarization segment could be matched to a text run.
+    public static let unknownID = "unknown"
+
+    public var id: String
+    public var displayName: String
+    /// Index into the app's speaker colour palette, assigned by first appearance.
+    public var colorIndex: Int
+
+    public init(id: String, displayName: String, colorIndex: Int) {
+        self.id = id
+        self.displayName = displayName
+        self.colorIndex = colorIndex
+    }
+
+    public var isUnknown: Bool { id == Self.unknownID }
+}

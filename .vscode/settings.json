@@ -1,0 +1,11 @@
+{
+    // Swift Testing ships with the Command Line Tools rather than the macOS
+    // SDK, so builds of the test target need these search paths (the same ones
+    // Scripts/test.sh passes). Harmless with a full Xcode install.
+    "swift.buildArguments": [
+        "-Xswiftc", "-F", "-Xswiftc", "/Library/Developer/CommandLineTools/Library/Developer/Frameworks",
+        "-Xlinker", "-F", "-Xlinker", "/Library/Developer/CommandLineTools/Library/Developer/Frameworks",
+        "-Xlinker", "-rpath", "-Xlinker", "/Library/Developer/CommandLineTools/Library/Developer/Frameworks",
+        "-Xlinker", "-rpath", "-Xlinker", "/Library/Developer/CommandLineTools/Library/Developer/usr/lib"
+    ]
+}

@@ -1,0 +1,44 @@
+{
+    "configurations": [
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:Meeting Notes}",
+            "name": "Debug MeetingNotesApp",
+            "target": "MeetingNotesApp",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug MeetingNotesApp"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:Meeting Notes}",
+            "name": "Release MeetingNotesApp",
+            "target": "MeetingNotesApp",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release MeetingNotesApp"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:Meeting Notes}",
+            "name": "Debug meeting-notes-cli",
+            "target": "meeting-notes-cli",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug meeting-notes-cli"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:Meeting Notes}",
+            "name": "Release meeting-notes-cli",
+            "target": "meeting-notes-cli",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release meeting-notes-cli"
+        }
+    ]
+}
