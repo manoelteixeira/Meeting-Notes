@@ -41,17 +41,20 @@ public struct ProcessingPipeline: Sendable {
     private let transcription: any TranscriptionService
     private let diarization: any DiarizationService
     private let notes: any NotesService
+    private let notesTemplate: NotesTemplate
 
     public init(
         store: MeetingStore,
         transcription: any TranscriptionService = AppleSpeechTranscriptionService(),
         diarization: any DiarizationService = FluidAudioDiarizationService(),
-        notes: any NotesService = MLXNotesService()
+        notes: any NotesService = MLXNotesService(),
+        notesTemplate: NotesTemplate = .default
     ) {
         self.store = store
         self.transcription = transcription
         self.diarization = diarization
         self.notes = notes
+        self.notesTemplate = notesTemplate
     }
 
     // MARK: - Entry point
@@ -228,7 +231,7 @@ public struct ProcessingPipeline: Sendable {
         // only real progress signal is the text streaming out.
         onProgress(PipelineProgress(stage: .noted, kind: .indeterminate))
 
-        let generator = NotesGenerator(service: notes)
+        let generator = NotesGenerator(service: notes, template: notesTemplate)
         let generated = try await generator.generate(
             for: meeting,
             onDelta: options.streamNotes ? (onNotesDelta ?? { _ in }) : nil

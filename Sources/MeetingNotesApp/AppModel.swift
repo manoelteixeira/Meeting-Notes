@@ -59,6 +59,19 @@ final class AppModel {
 
     var notesModel: NotesModel { NotesModelCatalog.model(id: notesModelID) }
 
+    /// The user's notes format — sections plus extra instructions. Edited live
+    /// by Settings, so the didSet must stay cheap: persist and swap the
+    /// pipeline value, never touch the loaded model.
+    var notesTemplate: NotesTemplate {
+        didSet {
+            guard notesTemplate != oldValue else { return }
+            UserDefaults.standard.set(
+                notesTemplate.encoded(), forKey: Self.notesTemplateDefaultsKey
+            )
+            rebuildPipeline()
+        }
+    }
+
     /// Whether the selected model is on disk, which is what gates every
     /// notes-generating affordance in the UI.
     var hasNotesModel: Bool {
@@ -85,15 +98,22 @@ final class AppModel {
 
     private static let localeDefaultsKey = "transcriptionLocaleIdentifier"
     private static let notesModelDefaultsKey = "notesModelIdentifier"
+    private static let notesTemplateDefaultsKey = "notesTemplate"
 
     init(store: MeetingStore) {
         let notesModelID = UserDefaults.standard.string(forKey: Self.notesModelDefaultsKey)
         let notesModel = NotesModelCatalog.model(id: notesModelID)
+        let template = NotesTemplate.load(
+            from: UserDefaults.standard.data(forKey: Self.notesTemplateDefaultsKey)
+        )
 
         let service = MLXNotesService(model: notesModel)
         self.store = store
         self.notesService = service
-        self.pipeline = ProcessingPipeline(store: store, notes: service)
+        self.notesTemplate = template
+        self.pipeline = ProcessingPipeline(
+            store: store, notes: service, notesTemplate: template
+        )
         self.localeIdentifier = UserDefaults.standard.string(forKey: Self.localeDefaultsKey)
             ?? Locale.current.identifier(.bcp47)
         self.notesModelID = notesModel.id
@@ -403,7 +423,19 @@ final class AppModel {
         // Free the old model's resident memory; its download stays on disk.
         Task { await previous.unload() }
         notesService = MLXNotesService(model: notesModel)
-        pipeline = ProcessingPipeline(store: store, notes: notesService)
+        rebuildPipeline()
+    }
+
+    /// Cheap enough for a per-keystroke template edit: the loaded model is
+    /// untouched, only the pipeline value is replaced.
+    private func rebuildPipeline() {
+        pipeline = ProcessingPipeline(
+            store: store, notes: notesService, notesTemplate: notesTemplate
+        )
+    }
+
+    func resetNotesTemplate() {
+        notesTemplate = .default
     }
 
     // MARK: - Mutation helpers

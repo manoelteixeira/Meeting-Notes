@@ -11,7 +11,7 @@ struct SettingsView: View {
             TranscriptionSettings(model: model)
                 .tabItem { Label("Transcription", systemImage: "waveform") }
         }
-        .frame(width: 520, height: 320)
+        .frame(width: 520, height: 560)
     }
 }
 
@@ -41,12 +41,94 @@ private struct NotesSettings: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
             }
+
+            Section {
+                ForEach($model.notesTemplate.sections) { $section in
+                    NotesSectionRow(section: $section) {
+                        model.notesTemplate.sections.removeAll { $0.id == section.id }
+                    }
+                }
+                .onMove { source, destination in
+                    model.notesTemplate.sections.move(
+                        fromOffsets: source, toOffset: destination
+                    )
+                }
+                .onDelete { offsets in
+                    model.notesTemplate.sections.remove(atOffsets: offsets)
+                }
+
+                Button("Add Section", systemImage: "plus") {
+                    model.notesTemplate.sections.append(.init(title: ""))
+                }
+
+                TextField(
+                    "Additional instructions",
+                    text: $model.notesTemplate.additionalInstructions,
+                    prompt: Text("e.g. Write in Portuguese; keep bullets terse"),
+                    axis: .vertical
+                )
+                .lineLimit(2...4)
+
+                LabeledContent("") {
+                    Button("Reset to Defaults") { model.resetNotesTemplate() }
+                        .disabled(model.notesTemplate == .default)
+                }
+            } header: {
+                Text("Notes format")
+            } footer: {
+                Text(
+                    "The sections the notes are written in, in order, each with "
+                        + "optional guidance for what it should contain. Applies to all "
+                        + "meetings; existing notes keep their text until you "
+                        + "regenerate them."
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
         }
         .formStyle(.grouped)
         .padding(.top, 8)
         .task {
             await model.refreshNotesModelStatus()
             await model.checkForNotesModelUpdates()
+        }
+    }
+}
+
+/// One editable section of the notes template: its heading, its guidance, and
+/// a remove button — macOS has no swipe-to-delete, so removal needs a visible
+/// affordance. Reordering comes from the surrounding `onMove`.
+private struct NotesSectionRow: View {
+    @Binding var section: NotesTemplate.Section
+    let onRemove: () -> Void
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline) {
+            VStack(alignment: .leading, spacing: 2) {
+                TextField(
+                    "Section heading",
+                    text: $section.title,
+                    prompt: Text("Section heading")
+                )
+                TextField(
+                    "Guidance",
+                    text: $section.guidance,
+                    prompt: Text("Guidance for this section (optional)"),
+                    axis: .vertical
+                )
+                .lineLimit(1...3)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+            .textFieldStyle(.plain)
+
+            Button {
+                onRemove()
+            } label: {
+                Image(systemName: "minus.circle")
+            }
+            .buttonStyle(.borderless)
+            .accessibilityLabel("Remove section")
         }
     }
 }

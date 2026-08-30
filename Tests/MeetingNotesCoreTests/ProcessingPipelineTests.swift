@@ -38,13 +38,15 @@ struct ProcessingPipelineTests {
         store: MeetingStore,
         transcription: StubTranscriptionService,
         diarization: StubDiarizationService,
-        notes: StubNotesService
+        notes: StubNotesService,
+        notesTemplate: NotesTemplate = .default
     ) -> ProcessingPipeline {
         ProcessingPipeline(
             store: store,
             transcription: transcription,
             diarization: diarization,
-            notes: notes
+            notes: notes,
+            notesTemplate: notesTemplate
         )
     }
 
@@ -84,11 +86,12 @@ struct ProcessingPipelineTests {
     @Test("With a model installed the run finishes and stores the notes")
     func completesWithNotes() async throws {
         try await withFixture { store, meeting in
+            let notes = StubNotesService(markdown: "## Summary\n\nShort meeting.")
             let pipeline = makePipeline(
                 store: store,
                 transcription: StubTranscriptionService(runs: runs),
                 diarization: StubDiarizationService(segments: segments),
-                notes: StubNotesService(markdown: "## Summary\n\nShort meeting.")
+                notes: notes
             )
 
             let processed = try await pipeline.process(
@@ -99,6 +102,40 @@ struct ProcessingPipelineTests {
             #expect(processed.status == .completed)
             #expect(processed.lastCompletedStage == .noted)
             #expect(processed.notesMarkdown == "## Summary\n\nShort meeting.")
+            // Not passing a template means the model saw the stock prompt.
+            #expect(notes.calls.withLock { $0.lastSystem } == NotesPrompt.systemPrompt())
+        }
+    }
+
+    @Test("A custom notes template reaches the model's system prompt")
+    func customTemplateReachesModel() async throws {
+        try await withFixture { store, meeting in
+            let notes = StubNotesService(markdown: "## Overview\n\nShort meeting.")
+            let template = NotesTemplate(
+                sections: [
+                    .init(title: "Overview", guidance: "one paragraph."),
+                    .init(title: "Risks"),
+                ],
+                additionalInstructions: "Be terse."
+            )
+            let pipeline = makePipeline(
+                store: store,
+                transcription: StubTranscriptionService(runs: runs),
+                diarization: StubDiarizationService(segments: segments),
+                notes: notes,
+                notesTemplate: template
+            )
+
+            let processed = try await pipeline.process(
+                meeting,
+                options: ProcessingPipeline.Options(generateNotes: true, streamNotes: false)
+            )
+            #expect(processed.status == .completed)
+
+            let system = try #require(notes.calls.withLock { $0.lastSystem })
+            #expect(system.contains("## Overview\n## Risks"))
+            #expect(system.contains("- Start your response with `## Overview`."))
+            #expect(system.hasSuffix("Additional instructions:\nBe terse."))
         }
     }
 

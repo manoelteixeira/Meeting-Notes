@@ -118,7 +118,8 @@ public actor MLXNotesService: NotesService {
             ),
             // Qwen3 is a hybrid reasoning model: left alone it opens with a
             // `<think>` block, which would land in the notes and push the
-            // required `## Summary` off the front. The chat template reads this
+            // required first heading off the front. The chat template reads
+            // this
             // flag and skips the block entirely.
             additionalContext: ["enable_thinking": false]
         )
@@ -153,7 +154,7 @@ public actor MLXNotesService: NotesService {
 
     /// Belt and braces for `enable_thinking: false`: a model whose template
     /// ignores the flag still emits a reasoning block, and everything up to the
-    /// closing tag has to go or the notes will not start at `## Summary`.
+    /// closing tag has to go or the notes will not start at the first heading.
     ///
     /// An unterminated block means generation was cut off inside the reasoning,
     /// leaving no notes at all — dropping it all is correct, and the empty

@@ -55,7 +55,8 @@ struct CLI {
 
         let pipeline = ProcessingPipeline(
             store: store,
-            notes: MLXNotesService(model: notesModel(arguments))
+            notes: MLXNotesService(model: notesModel(arguments)),
+            notesTemplate: notesTemplate(arguments)
         )
 
         let reporter = ProgressReporter()
@@ -196,6 +197,26 @@ struct CLI {
         NotesModelCatalog.model(id: arguments.value("notes-model"))
     }
 
+    /// `--notes-sections "A,B,C"` and `--notes-instructions "..."`, defaulting
+    /// to the standard template. A title matching one of the default sections
+    /// keeps that section's guidance, so `--notes-sections "Summary,Decisions"`
+    /// still gets the standard rules for both; other titles get a heading and
+    /// no rule. Absent or empty values fall back rather than failing.
+    private static func notesTemplate(_ arguments: Arguments) -> NotesTemplate {
+        var template = NotesTemplate.default
+        if let list = arguments.value("notes-sections") {
+            template.sections = list.split(separator: ",").map { rawTitle in
+                let title = rawTitle.trimmingCharacters(in: .whitespaces)
+                let canonical = NotesTemplate.default.sections.first {
+                    $0.title.compare(title, options: .caseInsensitive) == .orderedSame
+                }
+                return canonical ?? .init(title: title)
+            }
+        }
+        template.additionalInstructions = arguments.value("notes-instructions") ?? ""
+        return template
+    }
+
     /// Imports into a throwaway store so CLI runs never touch the app's library.
     private static func makeScratchMeeting(
         for audioURL: URL,
@@ -217,6 +238,8 @@ struct CLI {
 
             USAGE
               meeting-notes-cli process <audio-file> [--notes] [--notes-model <id>]
+                                        [--notes-sections "<a,b,c>"]
+                                        [--notes-instructions "<text>"]
                                         [--locale <bcp47>] [--output <file.md>]
               meeting-notes-cli transcribe <audio-file> [--locale <bcp47>]
               meeting-notes-cli diarize <audio-file>
@@ -234,6 +257,11 @@ struct CLI {
             NOTES
               Everything runs on this Mac. Nothing but the one-time model downloads
               ever touches the network — no audio, and no transcript text.
+
+              --notes-sections replaces the default section headings (Summary, Key
+              Discussion Points, Decisions, Action Items) with a comma-separated
+              list of your own; --notes-instructions adds free-form guidance such
+              as a language or level of detail.
             """
         )
     }

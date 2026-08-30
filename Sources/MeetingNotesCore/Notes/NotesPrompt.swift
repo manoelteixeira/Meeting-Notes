@@ -2,43 +2,67 @@ import Foundation
 
 /// The prompt that turns a speaker-attributed transcript into meeting notes.
 ///
-/// The section headings are fixed so the Notes tab, the Markdown export, and any
-/// later parsing all agree on the document's shape.
+/// The section headings and per-section rules come from the user's
+/// `NotesTemplate`; the scaffolding around them — the exact-headings mandate
+/// and the anti-hallucination rules — is fixed, so the model is always told
+/// precisely what shape to produce.
 public enum NotesPrompt {
 
-    public static let systemPrompt = """
-        You are an expert meeting-notes writer. You are given the transcript of a \
-        recorded meeting. Each line is formatted as `[mm:ss] Speaker Name: text`. \
-        The transcript comes from automatic speech recognition and automatic \
-        speaker separation, so expect occasional misheard words and occasional \
-        lines attributed to the wrong speaker.
+    public static func systemPrompt(template: NotesTemplate = .default) -> String {
+        let template = template.sanitized()
+        let sections = template.sections
+        let count = countWord(sections.count)
+        let noun = sections.count == 1 ? "section" : "sections"
 
-        Write the notes as Markdown using exactly these four sections, in this \
-        order, with these exact headings:
+        var rules: [String] = []
+        rules.append(
+            "Start your response with `## \(sections[0].title)`. Do not add a "
+                + "title, a preamble, or any text before or after the \(count) \(noun)."
+        )
+        for section in sections where !section.guidance.isEmpty {
+            rules.append("\(section.title): \(section.guidance)")
+        }
+        rules.append(
+            "Prefer the speaker names as given. Do not invent participants, "
+                + "decisions, dates, or numbers that are not supported by the transcript."
+        )
+        rules.append(
+            "If a passage is too garbled to interpret, leave it out rather than "
+                + "guessing at it."
+        )
 
-        ## Summary
-        ## Key Discussion Points
-        ## Decisions
-        ## Action Items
+        var prompt = """
+            You are an expert meeting-notes writer. You are given the transcript of a \
+            recorded meeting. Each line is formatted as `[mm:ss] Speaker Name: text`. \
+            The transcript comes from automatic speech recognition and automatic \
+            speaker separation, so expect occasional misheard words and occasional \
+            lines attributed to the wrong speaker.
 
-        Rules:
-        - Start your response with `## Summary`. Do not add a title, a preamble, \
-        or any text before or after the four sections.
-        - Summary: two to four sentences on what the meeting was about and where \
-        it landed.
-        - Key Discussion Points: bullets. Group related discussion together \
-        rather than replaying the transcript chronologically.
-        - Decisions: bullets, each stating what was decided. Write "No explicit \
-        decisions were recorded." if there were none.
-        - Action Items: GitHub-style task list items, `- [ ] `. Where the owner \
-        can be inferred, prefix the task with the speaker's name and an em dash, \
-        e.g. `- [ ] Priya — send the revised budget by Friday`. Write \
-        "- [ ] No action items were recorded." if there were none.
-        - Prefer the speaker names as given. Do not invent participants, \
-        decisions, dates, or numbers that are not supported by the transcript.
-        - If a passage is too garbled to interpret, leave it out rather than \
-        guessing at it.
-        """
+            Write the notes as Markdown using exactly these \(count) \(noun), in this \
+            order, with these exact headings:
+
+            \(sections.map { "## \($0.title)" }.joined(separator: "\n"))
+
+            Rules:
+            \(rules.map { "- \($0)" }.joined(separator: "\n"))
+            """
+
+        if !template.additionalInstructions.isEmpty {
+            prompt += "\n\nAdditional instructions:\n\(template.additionalInstructions)"
+        }
+        return prompt
+    }
+
+    /// The section-count words the default and near-default templates need,
+    /// spelled out the way the original prompt did; larger counts fall back
+    /// to digits.
+    private static func countWord(_ count: Int) -> String {
+        let words = [
+            "zero", "one", "two", "three", "four", "five",
+            "six", "seven", "eight", "nine", "ten",
+        ]
+        return words.indices.contains(count) ? words[count] : String(count)
+    }
 
     /// Wraps the transcript in the user turn.
     public static func userPrompt(

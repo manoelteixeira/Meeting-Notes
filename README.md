@@ -21,9 +21,14 @@ offline, and neither the audio nor the transcript leaves the machine.
   appearance and can be renamed inline in the transcript — the name applies
   everywhere at once.
 - **Meeting notes written locally** by a quantized Qwen3 running on the GPU via
-  MLX: a summary plus decisions and action items, in a consistent four-section
+  MLX: a summary plus decisions and action items, in a consistent sectioned
   format. Regenerate on demand, e.g. after renaming speakers or switching to a
   bigger model.
+- **Customizable notes.** Settings › Notes edits the section list —
+  add, remove, rename or reorder sections, each with optional guidance on what
+  it should contain — plus free-form instructions such as a language or level
+  of detail. The setting applies to every meeting; regenerate to apply it to
+  notes written earlier.
 - **A meeting library** in the sidebar, with per-meeting status at a glance and
   rename, reprocess and delete a right-click away. Each meeting keeps its own
   copy of the audio, so the original file can move or vanish.
@@ -136,6 +141,12 @@ $CLI process recording.m4a --notes --notes-model qwen3-8b-4bit
 `--notes-model` takes a catalog id — `qwen3-1.7b-4bit`, `qwen3-4b-4bit` or
 `qwen3-8b-4bit` — and an unknown one falls back to the default rather than
 failing, the way `--locale` does.
+
+`--notes-sections "Summary,Risks,Next Steps"` replaces the default section
+headings with your own (a title matching a default section keeps its standard
+rules), and `--notes-instructions "Write in Portuguese"` adds free-form
+guidance. Both mirror the customization in the app's Settings, though the CLI
+does not read the app's saved template.
 
 Progress goes to stderr and Markdown to stdout, so `... > notes.md` gives you a
 clean file.

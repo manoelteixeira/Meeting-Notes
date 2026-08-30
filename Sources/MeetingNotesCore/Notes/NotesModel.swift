@@ -3,9 +3,9 @@ import Foundation
 /// One entry in the curated catalog of models that can write notes.
 ///
 /// The catalog is deliberately small and hardcoded: every entry has been checked
-/// against the four-section format `NotesPrompt` asks for, which is a contract
-/// `MarkdownExporter` and the Notes tab both depend on. An arbitrary repo ID
-/// would not carry that guarantee.
+/// against the sectioned format `NotesPrompt` composes from the notes template,
+/// which is a contract `MarkdownExporter` and the Notes tab both depend on. An
+/// arbitrary repo ID would not carry that guarantee.
 public struct NotesModel: Sendable, Equatable, Identifiable, Codable {
     /// Stable identifier persisted in `UserDefaults`; not the repo ID, so a
     /// repo can be repointed without invalidating the user's choice.

@@ -19,9 +19,11 @@ public struct GeneratedNotes: Sendable, Equatable {
 public struct NotesGenerator: Sendable {
 
     private let service: any NotesService
+    private let template: NotesTemplate
 
-    public init(service: any NotesService) {
+    public init(service: any NotesService, template: NotesTemplate = .default) {
         self.service = service
+        self.template = template
     }
 
     /// - Parameter onDelta: called with incremental text as it is generated;
@@ -47,7 +49,7 @@ public struct NotesGenerator: Sendable {
         )
 
         let completion = try await service.generate(
-            system: NotesPrompt.systemPrompt,
+            system: NotesPrompt.systemPrompt(template: template),
             user: user,
             onDelta: onDelta
         )
