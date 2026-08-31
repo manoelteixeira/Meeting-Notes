@@ -39,6 +39,28 @@ struct MeetingCodableTests {
         #expect(decoded == original)
     }
 
+    @Test("A pre-recognition speaker without personID still decodes")
+    func oldSpeakerFormatDecodes() throws {
+        // Written by app versions that predate voice recognition.
+        let json = Data(#"{"id": "A", "displayName": "Priya", "colorIndex": 1}"#.utf8)
+
+        let decoded = try decoder.decode(Speaker.self, from: json)
+
+        #expect(decoded == Speaker(id: "A", displayName: "Priya", colorIndex: 1))
+        #expect(decoded.personID == nil)
+    }
+
+    @Test("A speaker linked to a person round-trips with the link intact")
+    func linkedSpeakerRoundTrip() throws {
+        let personID = UUID()
+        let original = Speaker(id: "A", displayName: "Priya", colorIndex: 1, personID: personID)
+
+        let decoded = try decoder.decode(Speaker.self, from: encoder.encode(original))
+
+        #expect(decoded == original)
+        #expect(decoded.personID == personID)
+    }
+
     @Test("Every processing status round-trips, including its payload")
     func statusRoundTrip() throws {
         let statuses: [ProcessingStatus] = [

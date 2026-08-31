@@ -39,12 +39,14 @@ struct ProcessingPipelineTests {
         transcription: StubTranscriptionService,
         diarization: StubDiarizationService,
         notes: StubNotesService,
+        directory: SpeakerDirectory? = nil,
         notesTemplate: NotesTemplate = .default
     ) -> ProcessingPipeline {
         ProcessingPipeline(
             store: store,
             transcription: transcription,
             diarization: diarization,
+            directory: directory,
             notes: notes,
             notesTemplate: notesTemplate
         )
@@ -268,6 +270,152 @@ struct ProcessingPipelineTests {
             let recorded = events.withLock { $0 }
             let finished = Set(recorded.filter { $0.kind == .finished }.map(\.stage))
             #expect(finished == [.decoded, .transcribed, .diarized, .merged])
+        }
+    }
+
+    // MARK: - Voice recognition
+
+    // Long enough that both voices clear the recognizer's minimum-speech gate.
+    private var longRuns: [TimedTextRun] {
+        [
+            TimedTextRun(start: 0, end: 15, text: "Thanks everyone for joining today."),
+            TimedTextRun(start: 16, end: 31, text: "Happy to walk through the numbers."),
+        ]
+    }
+    private var longSegments: [DiarizedSegment] {
+        [
+            DiarizedSegment(speakerID: "A", start: 0, end: 15.5),
+            DiarizedSegment(speakerID: "B", start: 15.5, end: 31),
+        ]
+    }
+    private let voiceA: [Float] = [1, 0]
+    private let voiceB: [Float] = [0, 1]
+
+    @Test("Recognition links speakers, promotes renames, and names later meetings")
+    func recognitionAcrossMeetings() async throws {
+        let root = try AudioFixtures.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appending(path: "Weekly.wav", directoryHint: .notDirectory)
+        try AudioFixtures.writeSineWAV(to: source, seconds: 1.0)
+        let store = try MeetingStore(
+            rootDirectory: root.appending(path: "library", directoryHint: .isDirectory)
+        )
+        let directory = try SpeakerDirectory(
+            fileURL: root.appending(path: "people.json", directoryHint: .notDirectory)
+        )
+        let pipeline = makePipeline(
+            store: store,
+            transcription: StubTranscriptionService(runs: longRuns),
+            diarization: StubDiarizationService(
+                segments: longSegments,
+                embeddings: ["A": voiceA, "B": voiceB]
+            ),
+            notes: noModel,
+            directory: directory
+        )
+
+        // First meeting: both voices are new — linked, enrolled unnamed.
+        var first = try await store.importAudio(from: source)
+        first = try await pipeline.process(first)
+        #expect(first.speakers.map(\.displayName) == ["Speaker 1", "Speaker 2"])
+        #expect(first.speakers.allSatisfy { $0.personID != nil })
+        #expect(await directory.people().count == 2)
+        #expect(await directory.people().allSatisfy { $0.name == nil })
+
+        // The user renames speaker A; reprocessing promotes that name onto the
+        // still-unnamed person record.
+        let personA = try #require(first.speaker(id: "A")?.personID)
+        var renamed = first
+        let indexA = try #require(renamed.speakers.firstIndex(where: { $0.id == "A" }))
+        renamed.speakers[indexA].displayName = "Priya"
+        try await store.save(renamed)
+        let reprocessed = try await pipeline.process(
+            renamed, options: .init(forceReprocess: true)
+        )
+        #expect(reprocessed.speaker(id: "A")?.displayName == "Priya")
+        #expect(reprocessed.speaker(id: "A")?.personID == personA)
+        #expect(await directory.people().first { $0.id == personA }?.name == "Priya")
+
+        // Second meeting with the same voices: the name applies automatically,
+        // and nobody is enrolled twice.
+        var second = try await store.importAudio(from: source)
+        second = try await pipeline.process(second)
+        #expect(second.speaker(id: "A")?.displayName == "Priya")
+        #expect(second.speaker(id: "A")?.personID == personA)
+        #expect(second.speaker(id: "B")?.displayName == "Speaker 2")
+        #expect(second.speaker(id: "B")?.personID != nil)
+        #expect(await directory.people().count == 2)
+    }
+
+    @Test("Without a directory, speakers stay unlinked")
+    func noDirectoryMeansNoLinks() async throws {
+        try await withFixture { store, meeting in
+            let pipeline = makePipeline(
+                store: store,
+                transcription: StubTranscriptionService(runs: longRuns),
+                diarization: StubDiarizationService(
+                    segments: longSegments,
+                    embeddings: ["A": voiceA, "B": voiceB]
+                ),
+                notes: noModel
+            )
+
+            let processed = try await pipeline.process(meeting)
+
+            #expect(processed.speakers.allSatisfy { $0.personID == nil })
+        }
+    }
+
+    @Test("Speakers heard only briefly are not enrolled")
+    func briefSpeakersNotEnrolled() async throws {
+        try await withFixture { store, meeting in
+            let directory = try SpeakerDirectory(
+                fileURL: store.root.appending(path: "people.json", directoryHint: .notDirectory)
+            )
+            // The default fixture speakers talk for ~1.5 s each — below the gate.
+            let pipeline = makePipeline(
+                store: store,
+                transcription: StubTranscriptionService(runs: runs),
+                diarization: StubDiarizationService(
+                    segments: segments,
+                    embeddings: ["A": voiceA, "B": voiceB]
+                ),
+                notes: noModel,
+                directory: directory
+            )
+
+            let processed = try await pipeline.process(meeting)
+
+            #expect(processed.speakers.allSatisfy { $0.personID == nil })
+            #expect(await directory.people().isEmpty)
+        }
+    }
+
+    @Test("A directory that cannot be written never fails the run")
+    func directoryFailureIsNonFatal() async throws {
+        try await withFixture { store, meeting in
+            // Points into a directory that does not exist, so persisting throws.
+            let directory = try SpeakerDirectory(
+                fileURL: store.root
+                    .appending(path: "missing", directoryHint: .isDirectory)
+                    .appending(path: "people.json", directoryHint: .notDirectory)
+            )
+            let pipeline = makePipeline(
+                store: store,
+                transcription: StubTranscriptionService(runs: longRuns),
+                diarization: StubDiarizationService(
+                    segments: longSegments,
+                    embeddings: ["A": voiceA, "B": voiceB]
+                ),
+                notes: noModel,
+                directory: directory
+            )
+
+            let processed = try await pipeline.process(meeting)
+
+            #expect(processed.status == .needsModel)
+            #expect(processed.lastCompletedStage == .merged)
+            #expect(processed.speakers.allSatisfy { $0.personID == nil })
         }
     }
 

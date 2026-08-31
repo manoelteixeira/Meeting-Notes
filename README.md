@@ -20,6 +20,10 @@ offline, and neither the audio nor the transcript leaves the machine.
   speaker-attributed record of who said what. Speakers arrive numbered by first
   appearance and can be renamed inline in the transcript — the name applies
   everywhere at once.
+- **Voices recognized across meetings.** Name a speaker once and the next
+  recording of the same voice gets that name automatically; renaming them
+  anywhere renames them in every meeting. Voiceprints are derived on-device and
+  managed — or switched off entirely — in Settings › Speakers.
 - **Meeting notes written locally** by a quantized Qwen3 running on the GPU via
   MLX: a summary plus decisions and action items, in a consistent sectioned
   format. Regenerate on demand, e.g. after renaming speakers or switching to a
@@ -89,7 +93,7 @@ Notes offers three sizes:
 | Qwen3 4B *(default)* | `mlx-community/Qwen3-4B-4bit` | ~2.3 GB |
 | Qwen3 8B | `mlx-community/Qwen3-8B-4bit` | ~4.5 GB |
 
-Bigger should write better notes and hold the four-section format more
+Bigger should write better notes and hold the sectioned format more
 reliably; smaller loads faster and leaves more memory for the rest of the
 pipeline. Which one is worth the disk is a judgement best made on your own
 recordings.
@@ -197,6 +201,35 @@ milliseconds. `TranscriptMerger` reconciles them:
 It is a pure function over two arrays, which is why it carries the bulk of the
 tests.
 
+## Speaker recognition
+
+The diarizer labels speakers per recording — the same person is "S1" today and
+"S3" tomorrow. To connect them, the app keeps a small directory of people known
+by voice. Each diarization run also yields a compact numeric voiceprint per
+speaker (a 256-dimension embedding); after merging, every speaker who talked
+long enough is compared against the directory by cosine distance. A confident
+match links the speaker to that person and applies their name; an unfamiliar
+voice is enrolled as a new, unnamed person whose record improves as more
+meetings are heard.
+
+Naming works in both directions. Renaming a recognized speaker in a transcript
+renames that person in every meeting their voice was linked in, and stores the
+name for future recordings. Settings › Speakers lists everyone, shows how many
+meetings each voice appeared in, and offers rename and delete — deleting a
+voice keeps the names meetings already show but severs the link, and "Delete
+All Voices" erases every voiceprint. A toggle turns recognition off entirely,
+in which case new meetings behave exactly as before.
+
+The privacy story is unchanged: voiceprints are derived on this Mac from your
+own recordings, stored in a single local JSON file, and never leave the
+machine. They are also disposable — deleting them loses no transcript or note,
+only the automatic naming.
+
+Matching is deliberately conservative. A borderline voice becomes a duplicate
+unnamed entry rather than risk fusing two people into one record; give it a
+name (or delete it) and carry on. Speakers heard for only a few seconds are
+ignored — that little audio does not make a reliable voiceprint.
+
 ## Storage
 
 Meetings live in `~/Library/Application Support/MeetingNotes/Meetings/<uuid>/`
@@ -204,6 +237,12 @@ as `meeting.json` plus a copy of the imported audio, so moving or deleting the
 original recording does not break the library. The document is rewritten after
 every completed stage, so cancelling or crashing never loses finished work and a
 retry resumes rather than restarts.
+
+The voice directory is a sibling file,
+`~/Library/Application Support/MeetingNotes/people.json` — one record per known
+voice. The CLI neither reads nor writes it: `meeting-notes-cli` processes each
+file hermetically in a throwaway store, so scripted runs never touch the app's
+library or its voiceprints.
 
 Notes models live in the shared Hugging Face cache — `$HF_HUB_CACHE`, else
 `$HF_HOME/hub`, else `~/.cache/huggingface/hub` — so a model already pulled by
@@ -219,6 +258,7 @@ Sources/
     Transcription/      TranscriptionService protocol + the Apple implementation
     Diarization/        DiarizationService protocol + the FluidAudio implementation
     Merge/              TranscriptMerger — pure, heavily tested
+    Recognition/        SpeakerRecognizer — matches voiceprints across meetings
     Notes/              NotesService protocol, MLX implementation, model catalog
     Pipeline/           stage orchestration and progress
     Persistence/        MeetingStore actor
@@ -267,7 +307,7 @@ have pauses at turn changes, come out cleaner.
   4,096-token cap. If a meeting hits that cap the app says so rather than
   silently truncating.
 - A local model of this size writes noticeably plainer notes than a frontier
-  model would, and is likelier to drift off the four-section format on a long
+  model would, and is likelier to drift off the sectioned format on a long
   or messy transcript. If that happens, try the next size up.
 - The model stays resident between runs so a second meeting does not pay the
   load again; switching models in Settings releases the old one.

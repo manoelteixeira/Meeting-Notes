@@ -70,7 +70,7 @@ public final class FluidAudioDiarizationService: DiarizationService, @unchecked 
     public func diarize(
         samples: [Float],
         onProgress: @Sendable @escaping (Double) -> Void
-    ) async throws -> [DiarizedSegment] {
+    ) async throws -> DiarizationOutput {
         try await prepare(onDownloadProgress: { _ in })
         try Task.checkCancellation()
 
@@ -91,7 +91,7 @@ public final class FluidAudioDiarizationService: DiarizationService, @unchecked 
         }
 
         onProgress(1)
-        return result.segments
+        let segments = result.segments
             .map {
                 DiarizedSegment(
                     speakerID: $0.speakerId,
@@ -101,5 +101,11 @@ public final class FluidAudioDiarizationService: DiarizationService, @unchecked 
             }
             .filter { $0.duration > 0 }
             .sorted { $0.start < $1.start }
+        // The offline pipeline always builds the per-speaker centroid map; it
+        // is the voiceprint used to recognize the same person across meetings.
+        return DiarizationOutput(
+            segments: segments,
+            speakerEmbeddings: result.speakerDatabase ?? [:]
+        )
     }
 }

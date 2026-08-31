@@ -78,6 +78,21 @@ final class AppModel {
         notesModelStatus[notesModelID]?.isInstalled ?? false
     }
 
+    /// People known by voice, mirrored from the speaker directory for the UI.
+    private(set) var people: [Person] = []
+
+    /// Whether new meetings match voices against the speaker directory. Runs
+    /// already in flight keep the pipeline they started with.
+    var voiceRecognitionEnabled: Bool {
+        didSet {
+            guard voiceRecognitionEnabled != oldValue else { return }
+            UserDefaults.standard.set(
+                voiceRecognitionEnabled, forKey: Self.voiceRecognitionDefaultsKey
+            )
+            rebuildPipeline()
+        }
+    }
+
     /// BCP-47 locale used for transcription. New meetings inherit it.
     var localeIdentifier: String {
         didSet {
@@ -89,6 +104,7 @@ final class AppModel {
     // MARK: - Dependencies
 
     private let store: MeetingStore
+    private let directory: SpeakerDirectory
     /// Rebuilt when the selected model changes; in-flight runs keep the
     /// pipeline they started with. Not observation-tracked: the views read
     /// `notesModelStatus`, never these.
@@ -99,20 +115,29 @@ final class AppModel {
     private static let localeDefaultsKey = "transcriptionLocaleIdentifier"
     private static let notesModelDefaultsKey = "notesModelIdentifier"
     private static let notesTemplateDefaultsKey = "notesTemplate"
+    private static let voiceRecognitionDefaultsKey = "voiceRecognitionEnabled"
 
-    init(store: MeetingStore) {
+    init(store: MeetingStore, directory: SpeakerDirectory) {
         let notesModelID = UserDefaults.standard.string(forKey: Self.notesModelDefaultsKey)
         let notesModel = NotesModelCatalog.model(id: notesModelID)
         let template = NotesTemplate.load(
             from: UserDefaults.standard.data(forKey: Self.notesTemplateDefaultsKey)
         )
+        // Absent key means never touched: recognition defaults to on.
+        let recognitionEnabled = UserDefaults.standard
+            .object(forKey: Self.voiceRecognitionDefaultsKey) as? Bool ?? true
 
         let service = MLXNotesService(model: notesModel)
         self.store = store
+        self.directory = directory
         self.notesService = service
         self.notesTemplate = template
+        self.voiceRecognitionEnabled = recognitionEnabled
         self.pipeline = ProcessingPipeline(
-            store: store, notes: service, notesTemplate: template
+            store: store,
+            directory: recognitionEnabled ? directory : nil,
+            notes: service,
+            notesTemplate: template
         )
         self.localeIdentifier = UserDefaults.standard.string(forKey: Self.localeDefaultsKey)
             ?? Locale.current.identifier(.bcp47)
@@ -122,7 +147,7 @@ final class AppModel {
     /// Convenience initializer for the app itself; throws only if Application
     /// Support is unwritable, which the app surfaces at launch.
     static func makeDefault() throws -> AppModel {
-        AppModel(store: try MeetingStore())
+        AppModel(store: try MeetingStore(), directory: try SpeakerDirectory())
     }
 
     var selectedMeeting: Meeting? {
@@ -159,6 +184,7 @@ final class AppModel {
         }
         await refreshModelStatus()
         await refreshNotesModelStatus()
+        await refreshPeople()
     }
 
     func refreshModelStatus() async {
@@ -290,6 +316,8 @@ final class AppModel {
         tasks[id] = nil
         progress[id] = nil
         replace(meeting)
+        // The run may have enrolled voices it had not heard before.
+        Task { await refreshPeople() }
     }
 
     private func finishCancelled(_ id: UUID) {
@@ -325,9 +353,87 @@ final class AppModel {
     func renameSpeaker(_ speakerID: String, in meetingID: UUID, to name: String) {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        update(meetingID) { meeting in
-            guard let index = meeting.speakers.firstIndex(where: { $0.id == speakerID }) else { return }
-            meeting.speakers[index].displayName = trimmed
+        if let personID = meetings.first(where: { $0.id == meetingID })?
+            .speaker(id: speakerID)?.personID {
+            // A recognized voice: the name belongs to the person, everywhere.
+            renamePerson(personID, to: trimmed)
+        } else {
+            update(meetingID) { meeting in
+                guard let index = meeting.speakers.firstIndex(where: { $0.id == speakerID }) else { return }
+                meeting.speakers[index].displayName = trimmed
+            }
+        }
+    }
+
+    // MARK: - People
+
+    func refreshPeople() async {
+        people = await directory.people()
+    }
+
+    /// How many meetings in the library this voice was heard in. Computed from
+    /// the loaded meetings so deleting a meeting keeps it honest.
+    func meetingsCount(for personID: UUID) -> Int {
+        meetings.count { meeting in
+            meeting.speakers.contains { $0.personID == personID }
+        }
+    }
+
+    /// Renames a person everywhere: the directory (so future meetings pick the
+    /// name up) and every meeting their voice was recognized in.
+    func renamePerson(_ personID: UUID, to name: String) {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        Task {
+            try? await directory.rename(id: personID, to: trimmed)
+            await refreshPeople()
+        }
+        for index in meetings.indices {
+            var changed = false
+            for speakerIndex in meetings[index].speakers.indices
+            where meetings[index].speakers[speakerIndex].personID == personID {
+                meetings[index].speakers[speakerIndex].displayName = trimmed
+                changed = true
+            }
+            if changed {
+                let snapshot = meetings[index]
+                Task { try? await store.save(snapshot) }
+            }
+        }
+    }
+
+    /// Forgets a voice. Meetings keep the name text they show, but the links
+    /// are severed — a later rename in one meeting no longer touches others.
+    func deletePerson(_ personID: UUID) {
+        Task {
+            try? await directory.delete(id: personID)
+            await refreshPeople()
+        }
+        clearLinks { $0 == personID }
+    }
+
+    func deleteAllPeople() {
+        Task {
+            try? await directory.deleteAll()
+            await refreshPeople()
+        }
+        clearLinks { _ in true }
+    }
+
+    private func clearLinks(_ matching: (UUID) -> Bool) {
+        for index in meetings.indices {
+            var changed = false
+            for speakerIndex in meetings[index].speakers.indices {
+                if let personID = meetings[index].speakers[speakerIndex].personID,
+                   matching(personID) {
+                    meetings[index].speakers[speakerIndex].personID = nil
+                    changed = true
+                }
+            }
+            if changed {
+                let snapshot = meetings[index]
+                Task { try? await store.save(snapshot) }
+            }
         }
     }
 
@@ -430,7 +536,10 @@ final class AppModel {
     /// untouched, only the pipeline value is replaced.
     private func rebuildPipeline() {
         pipeline = ProcessingPipeline(
-            store: store, notes: notesService, notesTemplate: notesTemplate
+            store: store,
+            directory: voiceRecognitionEnabled ? directory : nil,
+            notes: notesService,
+            notesTemplate: notesTemplate
         )
     }
 

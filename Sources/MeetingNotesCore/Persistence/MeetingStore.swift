@@ -153,37 +153,6 @@ public actor MeetingStore {
 
     // MARK: - Coding
 
-    /// ISO 8601 with fractional seconds: readable when someone opens
-    /// `meeting.json`, and precise enough that a save/load round-trip does not
-    /// visibly shift a meeting's timestamp. `ISO8601FormatStyle` is a `Sendable`
-    /// value type, unlike `ISO8601DateFormatter`.
-    static let dateStyle = Date.ISO8601FormatStyle(includingFractionalSeconds: true)
-
-    private static let encoder: JSONEncoder = {
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        encoder.dateEncodingStrategy = .custom { date, encoder in
-            var container = encoder.singleValueContainer()
-            try container.encode(date.formatted(dateStyle))
-        }
-        return encoder
-    }()
-
-    private static let decoder: JSONDecoder = {
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .custom { decoder in
-            let text = try decoder.singleValueContainer().decode(String.self)
-            do {
-                return try Date(text, strategy: dateStyle)
-            } catch {
-                throw DecodingError.dataCorrupted(
-                    .init(
-                        codingPath: decoder.codingPath,
-                        debugDescription: "Not an ISO 8601 date: \(text)"
-                    )
-                )
-            }
-        }
-        return decoder
-    }()
+    private static let encoder = StoreCoding.encoder
+    private static let decoder = StoreCoding.decoder
 }

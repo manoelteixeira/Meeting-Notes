@@ -42,17 +42,20 @@ public struct ProcessingPipeline: Sendable {
     private let diarization: any DiarizationService
     private let notes: any NotesService
     private let notesTemplate: NotesTemplate
+    private let directory: SpeakerDirectory?
 
     public init(
         store: MeetingStore,
         transcription: any TranscriptionService = AppleSpeechTranscriptionService(),
         diarization: any DiarizationService = FluidAudioDiarizationService(),
+        directory: SpeakerDirectory? = nil,
         notes: any NotesService = MLXNotesService(),
         notesTemplate: NotesTemplate = .default
     ) {
         self.store = store
         self.transcription = transcription
         self.diarization = diarization
+        self.directory = directory
         self.notes = notes
         self.notesTemplate = notesTemplate
     }
@@ -160,13 +163,13 @@ public struct ProcessingPipeline: Sendable {
         ) { fraction in
             onProgress(PipelineProgress(stage: .transcribed, kind: .running(fraction)))
         }
-        async let segmentsTask: [DiarizedSegment] = diarization.diarize(
+        async let diarizationTask: DiarizationOutput = diarization.diarize(
             samples: decoded.samples
         ) { fraction in
             onProgress(PipelineProgress(stage: .diarized, kind: .running(fraction)))
         }
 
-        let (runs, segments) = try await (runsTask, segmentsTask)
+        let (runs, diarized) = try await (runsTask, diarizationTask)
         onProgress(PipelineProgress(stage: .transcribed, kind: .finished))
         onProgress(PipelineProgress(stage: .diarized, kind: .finished))
 
@@ -181,9 +184,16 @@ public struct ProcessingPipeline: Sendable {
         // 4. Attribute text to speakers.
         try Task.checkCancellation()
         onProgress(PipelineProgress(stage: .merged, kind: .indeterminate))
-        let merged = TranscriptMerger.merge(runs: runs, diarization: segments)
+        let merged = TranscriptMerger.merge(runs: runs, diarization: diarized.segments)
         meeting.transcript = merged.segments
         meeting.speakers = Self.preservingRenames(merged.speakers, from: meeting.speakers)
+        if let directory {
+            await Self.applyRecognition(
+                to: &meeting,
+                embeddings: diarized.speakerEmbeddings,
+                directory: directory
+            )
+        }
         meeting.lastCompletedStage = .merged
         onProgress(PipelineProgress(stage: .merged, kind: .finished))
         try await store.save(meeting)
@@ -202,6 +212,54 @@ public struct ProcessingPipeline: Sendable {
             var renamed = speaker
             renamed.displayName = previous.displayName
             return renamed
+        }
+    }
+
+    /// Matches this meeting's voiceprints against the speaker directory and
+    /// links each recognized speaker to their person record.
+    ///
+    /// Name precedence per speaker: a name stored in the directory wins (rename
+    /// fan-out keeps the directory current, so on reprocess it already holds
+    /// the user's latest choice); an unnamed person takes a rename this meeting
+    /// already carries (so reprocessing a meeting where "Priya" was named
+    /// enrolls her voice under that name); otherwise the default "Speaker N"
+    /// stays, linked so a later rename anywhere propagates.
+    ///
+    /// Deliberately non-throwing: recognition failing must not fail an import
+    /// whose transcript is complete — speakers simply stay unlinked, exactly as
+    /// when recognition is off.
+    static func applyRecognition(
+        to meeting: inout Meeting,
+        embeddings: [String: [Float]],
+        directory: SpeakerDirectory
+    ) async {
+        let speakingTime = Dictionary(grouping: meeting.transcript, by: \.speakerID)
+            .mapValues { segments in
+                segments.reduce(0) { $0 + ($1.end - $1.start) }
+            }
+        guard let assignments = try? await directory.recognize(
+            embeddings: embeddings,
+            speakingTime: speakingTime,
+            meetingDate: meeting.createdAt
+        ) else { return }
+
+        // The names the merger would have assigned; anything else on a speaker
+        // is a rename the user made, mirroring `preservingRenames`.
+        let defaults = Set(meeting.speakers.map { speaker in
+            speaker.isUnknown ? speaker.displayName : "Speaker \(speaker.colorIndex)"
+        })
+
+        for assignment in assignments {
+            guard let index = meeting.speakers.firstIndex(
+                where: { $0.id == assignment.runSpeakerID }
+            ) else { continue }
+            meeting.speakers[index].personID = assignment.personID
+            let current = meeting.speakers[index].displayName
+            if let name = assignment.personName {
+                meeting.speakers[index].displayName = name
+            } else if !defaults.contains(current) {
+                try? await directory.rename(id: assignment.personID, to: current)
+            }
         }
     }
 

@@ -48,14 +48,20 @@ final class StubTranscriptionService: TranscriptionService, @unchecked Sendable 
     }
 }
 
-/// Diarization that returns canned speaker spans.
+/// Diarization that returns canned speaker spans and voiceprints.
 final class StubDiarizationService: DiarizationService, @unchecked Sendable {
     private let segments: [DiarizedSegment]
+    private let embeddings: [String: [Float]]
     private let error: (any Error)?
     let diarizeCount = Mutex(0)
 
-    init(segments: [DiarizedSegment] = [], error: (any Error)? = nil) {
+    init(
+        segments: [DiarizedSegment] = [],
+        embeddings: [String: [Float]] = [:],
+        error: (any Error)? = nil
+    ) {
         self.segments = segments
+        self.embeddings = embeddings
         self.error = error
     }
 
@@ -68,11 +74,11 @@ final class StubDiarizationService: DiarizationService, @unchecked Sendable {
     func diarize(
         samples: [Float],
         onProgress: @Sendable @escaping (Double) -> Void
-    ) async throws -> [DiarizedSegment] {
+    ) async throws -> DiarizationOutput {
         diarizeCount.withLock { $0 += 1 }
         if let error { throw error }
         onProgress(1)
-        return segments
+        return DiarizationOutput(segments: segments, speakerEmbeddings: embeddings)
     }
 }
 

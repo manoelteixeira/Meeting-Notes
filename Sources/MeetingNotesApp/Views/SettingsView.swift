@@ -10,6 +10,8 @@ struct SettingsView: View {
                 .tabItem { Label("Notes", systemImage: "sparkles") }
             TranscriptionSettings(model: model)
                 .tabItem { Label("Transcription", systemImage: "waveform") }
+            SpeakersSettingsView(model: model)
+                .tabItem { Label("Speakers", systemImage: "person.2") }
         }
         .frame(width: 520, height: 560)
     }

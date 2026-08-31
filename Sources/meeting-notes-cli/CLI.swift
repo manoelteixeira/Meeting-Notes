@@ -126,7 +126,7 @@ struct CLI {
         }
         let segments = try await service.diarize(samples: decoded.samples) { fraction in
             reporter.report(PipelineProgress(stage: .diarized, kind: .running(fraction)))
-        }
+        }.segments
         reporter.finish()
 
         print("")
