@@ -8,6 +8,7 @@ struct MeetingDetailView: View {
     let meeting: Meeting
 
     @State private var selectedTab = Tab.transcript
+    @State private var player = AudioPlayerController()
 
     enum Tab: Hashable { case transcript, notes }
 
@@ -31,6 +32,19 @@ struct MeetingDetailView: View {
 
             content
         }
+        .task(id: meeting.id) {
+            loadPlayer()
+        }
+        .onChange(of: isProcessing) { _, running in
+            // Reprocessing rewrites the transcript, so reload the segment
+            // timings once it settles; until then the old audio must not play.
+            if running {
+                player.stop()
+            } else {
+                loadPlayer()
+            }
+        }
+        .onDisappear { player.stop() }
         .navigationTitle(meeting.title)
         .navigationSubtitle(
             "\(MarkdownExporter.timestamp(meeting.duration)) · \(meeting.speakers.count) speakers"
@@ -48,7 +62,7 @@ struct MeetingDetailView: View {
             )
         } else if meeting.hasTranscript {
             TabView(selection: $selectedTab) {
-                TranscriptView(model: model, meeting: meeting)
+                TranscriptView(model: model, meeting: meeting, player: player)
                     .tabItem { Text("Transcript") }
                     .tag(Tab.transcript)
 
@@ -57,6 +71,9 @@ struct MeetingDetailView: View {
                     .tag(Tab.notes)
             }
             .padding(.top, 8)
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                AudioPlayerBar(player: player)
+            }
         } else {
             ContentUnavailableView {
                 Label("Not processed yet", systemImage: "waveform.badge.exclamationmark")
@@ -93,6 +110,15 @@ struct MeetingDetailView: View {
             .disabled(!meeting.hasTranscript)
             .help("Export the notes and transcript as Markdown")
         }
+    }
+
+    private func loadPlayer() {
+        guard meeting.hasTranscript, !isProcessing else { return }
+        player.load(
+            url: model.audioURL(for: meeting),
+            segments: meeting.transcript,
+            fallbackDuration: meeting.duration
+        )
     }
 
     private func export() {

@@ -84,6 +84,36 @@ struct MeetingStoreTests {
         }
     }
 
+    @Test("Editing one segment's text persists without touching its timing or neighbors")
+    func editSegmentTextRoundTrip() async throws {
+        try await withStore { store, _ in
+            let meeting = Meeting(
+                title: "Review",
+                audioFileName: "audio.m4a",
+                originalFileName: "review.m4a",
+                transcript: [
+                    TranscriptSegment(start: 0, end: 2, text: "Hello", speakerID: "A"),
+                    TranscriptSegment(start: 2, end: 5, text: "Wrold", speakerID: "B"),
+                    TranscriptSegment(start: 5, end: 7, text: "Bye", speakerID: "A"),
+                ]
+            )
+            try await store.save(meeting)
+
+            var edited = try await store.load(id: meeting.id)
+            edited.transcript[1].text = "World"
+            try await store.save(edited)
+
+            let reloaded = try await store.load(id: meeting.id)
+            #expect(reloaded.transcript[1].text == "World")
+            #expect(reloaded.transcript[1].id == meeting.transcript[1].id)
+            #expect(reloaded.transcript[1].start == meeting.transcript[1].start)
+            #expect(reloaded.transcript[1].end == meeting.transcript[1].end)
+            #expect(reloaded.transcript[1].speakerID == meeting.transcript[1].speakerID)
+            #expect(reloaded.transcript[0] == meeting.transcript[0])
+            #expect(reloaded.transcript[2] == meeting.transcript[2])
+        }
+    }
+
     @Test("Loading a meeting that does not exist throws notFound")
     func missingMeeting() async throws {
         try await withStore { store, _ in

@@ -365,6 +365,20 @@ final class AppModel {
         }
     }
 
+    /// Corrects one utterance's text, e.g. after hearing the audio disagree.
+    /// Timing and speaker attribution are left untouched; an empty edit is a
+    /// cancel, not a deletion.
+    func updateSegmentText(_ segmentID: UUID, in meetingID: UUID, to text: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        update(meetingID) { meeting in
+            guard let index = meeting.transcript.firstIndex(where: { $0.id == segmentID }),
+                  meeting.transcript[index].text != trimmed
+            else { return }
+            meeting.transcript[index].text = trimmed
+        }
+    }
+
     // MARK: - People
 
     func refreshPeople() async {
