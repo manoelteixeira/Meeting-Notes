@@ -93,6 +93,18 @@ final class AppModel {
         }
     }
 
+    /// Whether recordings capture other apps' audio — the far side of a call —
+    /// alongside the microphone. Takes effect at the next recording.
+    var includeSystemAudio: Bool {
+        didSet {
+            UserDefaults.standard.set(includeSystemAudio, forKey: Self.systemAudioDefaultsKey)
+        }
+    }
+
+    /// The in-app recorder. Its own observable, so meter ticks re-render only
+    /// the views that read it.
+    let recording = RecordingController()
+
     /// BCP-47 locale used for transcription. New meetings inherit it.
     var localeIdentifier: String {
         didSet {
@@ -116,6 +128,7 @@ final class AppModel {
     private static let notesModelDefaultsKey = "notesModelIdentifier"
     private static let notesTemplateDefaultsKey = "notesTemplate"
     private static let voiceRecognitionDefaultsKey = "voiceRecognitionEnabled"
+    private static let systemAudioDefaultsKey = "recordSystemAudio"
 
     init(store: MeetingStore, directory: SpeakerDirectory) {
         let notesModelID = UserDefaults.standard.string(forKey: Self.notesModelDefaultsKey)
@@ -133,6 +146,8 @@ final class AppModel {
         self.notesService = service
         self.notesTemplate = template
         self.voiceRecognitionEnabled = recognitionEnabled
+        self.includeSystemAudio = UserDefaults.standard
+            .object(forKey: Self.systemAudioDefaultsKey) as? Bool ?? true
         self.pipeline = ProcessingPipeline(
             store: store,
             directory: recognitionEnabled ? directory : nil,
@@ -185,6 +200,7 @@ final class AppModel {
         await refreshModelStatus()
         await refreshNotesModelStatus()
         await refreshPeople()
+        await recoverRecordings()
     }
 
     func refreshModelStatus() async {
@@ -218,10 +234,7 @@ final class AppModel {
         var imported: [Meeting] = []
         for url in urls {
             do {
-                var meeting = try await store.importAudio(from: url)
-                meeting.localeIdentifier = localeIdentifier
-                try await store.save(meeting)
-                imported.append(meeting)
+                imported.append(try await adopt(url, title: nil, transfer: .copy))
             } catch {
                 alert = AppAlert(
                     title: "Could not import “\(url.lastPathComponent)”",
@@ -229,12 +242,81 @@ final class AppModel {
                 )
             }
         }
+        add(imported)
+    }
+
+    /// Brings a file into the library as a new meeting in the current locale.
+    private func adopt(
+        _ url: URL, title: String?, transfer: MeetingStore.Transfer
+    ) async throws -> Meeting {
+        var meeting = try await store.importAudio(from: url, title: title, transfer: transfer)
+        meeting.localeIdentifier = localeIdentifier
+        try await store.save(meeting)
+        return meeting
+    }
+
+    /// Shows freshly imported meetings, selects the first, and processes them.
+    private func add(_ imported: [Meeting]) {
         guard !imported.isEmpty else { return }
 
         meetings.insert(contentsOf: imported, at: 0)
         meetings.sort { $0.createdAt > $1.createdAt }
         selectedMeetingID = imported.first?.id
         for meeting in imported { startProcessing(meeting.id) }
+    }
+
+    // MARK: - Recording
+
+    func startRecording() async {
+        guard !recording.isRecording else { return }
+        do {
+            let url = try await store.makeRecordingURL()
+            try await recording.start(to: url, includeSystemAudio: includeSystemAudio)
+        } catch {
+            alert = AppAlert(
+                title: "Could not start recording",
+                message: error.localizedDescription
+            )
+        }
+    }
+
+    /// Stops the recorder and turns the file into a meeting, which then
+    /// processes like any import.
+    func stopRecording() async {
+        guard let startedAt = recording.startedAt, let url = recording.stop() else { return }
+        do {
+            let meeting = try await adopt(url, title: Self.recordingTitle(startedAt), transfer: .move)
+            add([meeting])
+        } catch {
+            // A failed move is put back, so the next launch recovers the audio.
+            alert = AppAlert(
+                title: "Could not save the recording",
+                message: error.localizedDescription
+                    + " The audio was kept and will be recovered at next launch."
+            )
+        }
+    }
+
+    func discardRecording() {
+        recording.discard()
+    }
+
+    /// Imports recordings a crash or force quit left behind. Quiet on failure:
+    /// a file too short to hold any audio would otherwise alert every launch.
+    private func recoverRecordings() async {
+        var recovered: [Meeting] = []
+        for url in await store.orphanedRecordings() {
+            let created = (try? url.resourceValues(forKeys: [.creationDateKey]).creationDate) ?? Date()
+            let title = "Recovered " + Self.recordingTitle(created)
+            if let meeting = try? await adopt(url, title: title, transfer: .move) {
+                recovered.append(meeting)
+            }
+        }
+        add(recovered)
+    }
+
+    private static func recordingTitle(_ date: Date) -> String {
+        "Recording " + date.formatted(date: .abbreviated, time: .shortened)
     }
 
     // MARK: - Processing

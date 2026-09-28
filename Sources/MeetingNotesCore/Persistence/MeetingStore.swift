@@ -10,6 +10,8 @@ import Foundation
 /// ~/Library/Application Support/MeetingNotes/Meetings/<uuid>/
 ///     meeting.json
 ///     audio.m4a
+/// ~/Library/Application Support/MeetingNotes/Meetings/.recordings/
+///     <uuid>.caf                 # a recording in progress, or orphaned by a crash
 /// ```
 ///
 /// Plain Codable JSON rather than SwiftData: the documents are small, easy to
@@ -26,6 +28,14 @@ public actor MeetingStore {
             case .importFailed(let detail): "The recording could not be imported. \(detail)"
             }
         }
+    }
+
+    /// How `importAudio` takes ownership of the source file.
+    public enum Transfer: Sendable {
+        /// Leave the original where it is — the user's own file.
+        case copy
+        /// Take the file itself — a recording the app made, which has no other home.
+        case move
     }
 
     public nonisolated let root: URL
@@ -61,6 +71,37 @@ public actor MeetingStore {
 
     public nonisolated func audioURL(for meeting: Meeting) -> URL {
         directory(for: meeting.id).appending(path: meeting.audioFileName, directoryHint: .notDirectory)
+    }
+
+    /// Where recordings are written while they are in progress. Hidden and not
+    /// a UUID, so `loadAll` never mistakes it for a meeting; inside `root`, so
+    /// adopting a finished recording is a same-volume rename, not a copy.
+    public nonisolated var recordingsDirectory: URL {
+        root.appending(path: ".recordings", directoryHint: .isDirectory)
+    }
+
+    /// A fresh file URL for a new recording, creating the directory if needed.
+    public func makeRecordingURL() throws -> URL {
+        try fileManager.createDirectory(at: recordingsDirectory, withIntermediateDirectories: true)
+        return recordingsDirectory.appending(
+            path: "\(UUID().uuidString).caf", directoryHint: .notDirectory
+        )
+    }
+
+    /// Recordings left behind by a crash or a force quit — anything still in
+    /// the recordings directory when no recording is running. Oldest first.
+    public func orphanedRecordings() -> [URL] {
+        let entries = (try? fileManager.contentsOfDirectory(
+            at: recordingsDirectory,
+            includingPropertiesForKeys: [.creationDateKey],
+            options: [.skipsHiddenFiles]
+        )) ?? []
+        func created(_ url: URL) -> Date {
+            (try? url.resourceValues(forKeys: [.creationDateKey]).creationDate) ?? .distantPast
+        }
+        return entries
+            .filter { $0.pathExtension.lowercased() == "caf" }
+            .sorted { created($0) < created($1) }
     }
 
     // MARK: - Reading
@@ -108,8 +149,14 @@ public actor MeetingStore {
 
     // MARK: - Import
 
-    /// Copies `sourceURL` into a new meeting directory and records its duration.
-    public func importAudio(from sourceURL: URL, title: String? = nil) async throws -> Meeting {
+    /// Copies (or moves) `sourceURL` into a new meeting directory and records
+    /// its duration. A moved file that fails to import is put back, so a
+    /// recording is never lost to a failed probe.
+    public func importAudio(
+        from sourceURL: URL,
+        title: String? = nil,
+        transfer: Transfer = .copy
+    ) async throws -> Meeting {
         let didStartAccess = sourceURL.startAccessingSecurityScopedResource()
         defer { if didStartAccess { sourceURL.stopAccessingSecurityScopedResource() } }
 
@@ -126,7 +173,10 @@ public actor MeetingStore {
         let destination = directory.appending(path: audioFileName, directoryHint: .notDirectory)
 
         do {
-            try fileManager.copyItem(at: sourceURL, to: destination)
+            switch transfer {
+            case .copy: try fileManager.copyItem(at: sourceURL, to: destination)
+            case .move: try fileManager.moveItem(at: sourceURL, to: destination)
+            }
         } catch {
             try? fileManager.removeItem(at: directory)
             throw StoreError.importFailed(error.localizedDescription)
@@ -136,6 +186,7 @@ public actor MeetingStore {
         do {
             duration = try await AudioDecoder.probeDuration(url: destination)
         } catch {
+            if transfer == .move { try? fileManager.moveItem(at: destination, to: sourceURL) }
             try? fileManager.removeItem(at: directory)
             throw error
         }

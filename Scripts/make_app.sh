@@ -29,7 +29,7 @@ export DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Develope
 
 if ! xcrun -f metal >/dev/null 2>&1; then
   echo "error: the Metal toolchain is not installed. Install it with:" >&2
-  echo "       xcodebuild -downloadComponent MetalToolchain" >&2
+  echo "       DEVELOPER_DIR=\"$DEVELOPER_DIR\" xcodebuild -downloadComponent MetalToolchain" >&2
   exit 1
 fi
 

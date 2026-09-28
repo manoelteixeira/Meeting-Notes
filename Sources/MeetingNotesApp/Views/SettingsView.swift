@@ -12,6 +12,8 @@ struct SettingsView: View {
                 .tabItem { Label("Transcription", systemImage: "waveform") }
             SpeakersSettingsView(model: model)
                 .tabItem { Label("Speakers", systemImage: "person.2") }
+            RecordingSettings(model: model)
+                .tabItem { Label("Recording", systemImage: "mic") }
         }
         .frame(width: 520, height: 560)
     }
@@ -199,6 +201,31 @@ private struct ModelRow: View {
             Task { await model.removeNotesModel(entry) }
         }
         .disabled(model.notesModelDownload != nil)
+    }
+}
+
+private struct RecordingSettings: View {
+    @Bindable var model: AppModel
+
+    var body: some View {
+        Form {
+            Section {
+                Toggle("Include system audio", isOn: $model.includeSystemAudio)
+            } header: {
+                Text("Recording")
+            } footer: {
+                Text(
+                    "Records what other apps are playing — the other side of a "
+                        + "Zoom, Meet or Teams call — along with your microphone. "
+                        + "Turn it off for in-room meetings. macOS asks for "
+                        + "permission the first time; if it is denied, the system "
+                        + "meter stays silent. Recordings stay on this Mac."
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+        }
+        .formStyle(.grouped)
     }
 }
 

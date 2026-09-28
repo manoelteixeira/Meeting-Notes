@@ -48,6 +48,36 @@ enum AudioFixtures {
         return url
     }
 
+    /// Writes a mono 16-bit PCM CAF — the format the recorder produces.
+    @discardableResult
+    static func writeSineCAF(to url: URL, seconds: Double = 1.0) throws -> URL {
+        let sampleRate = 24_000.0
+        guard let format = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 1) else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+        let frameCount = AVAudioFrameCount(seconds * sampleRate)
+        guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frameCount) else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+        buffer.frameLength = frameCount
+        for frame in 0..<Int(frameCount) {
+            buffer.floatChannelData![0][frame] = Float(sin(2 * .pi * 440 * Double(frame) / sampleRate)) * 0.5
+        }
+        let settings: [String: Any] = [
+            AVFormatIDKey: kAudioFormatLinearPCM,
+            AVSampleRateKey: sampleRate,
+            AVNumberOfChannelsKey: 1,
+            AVLinearPCMBitDepthKey: 16,
+            AVLinearPCMIsFloatKey: false,
+        ]
+        // Scoped so the file is closed on return.
+        do {
+            let file = try AVAudioFile(forWriting: url, settings: settings)
+            try file.write(from: buffer)
+        }
+        return url
+    }
+
     /// A temporary directory the caller is responsible for removing.
     static func makeTemporaryDirectory() throws -> URL {
         let url = FileManager.default.temporaryDirectory

@@ -2,7 +2,7 @@
 
 A native macOS app that turns a meeting recording into structured notes.
 
-Drop in an audio file and it transcribes the speech, works out who said what,
+Record a meeting or drop in an audio file and it transcribes the speech, works out who said what,
 and writes up a summary with decisions and action items.
 
 **Where your data goes.** Nowhere. Transcription, speaker identification and
@@ -12,6 +12,13 @@ offline, and neither the audio nor the transcript leaves the machine.
 
 ## Features
 
+- **Record a meeting in the app** — the microphone plus, optionally, what
+  other apps are playing, so both sides of a Zoom, Meet or Teams call land in
+  one recording. Stop, and it processes like any import. The toolbar's record
+  button or File › New Recording (⇧⌘R) starts it; live meters show both
+  sources. Quitting mid-recording saves it first, and a recording cut short by
+  a crash is recovered at next launch. Settings › Recording turns system audio
+  off for in-room meetings.
 - **Import a recording** by dragging it into the window or with the file
   picker. Anything AVFoundation can decode works — m4a, mp3, wav, and the rest.
 - **On-device transcription** with Apple's `SpeechAnalyzer`, with word-level
@@ -238,6 +245,12 @@ original recording does not break the library. The document is rewritten after
 every completed stage, so cancelling or crashing never loses finished work and a
 retry resumes rather than restarts.
 
+A recording in progress is written to `Meetings/.recordings/<uuid>.caf` —
+16-bit PCM at up to 24 kHz, about 170 MB an hour, uncompressed so that a file
+whose writer never closed is still readable — and moved into its meeting's
+directory when it stops. Anything left there at launch is imported as a
+recovered recording.
+
 The voice directory is a sibling file,
 `~/Library/Application Support/MeetingNotes/people.json` — one record per known
 voice. The CLI neither reads nor writes it: `meeting-notes-cli` processes each
@@ -298,6 +311,12 @@ so a couple of boundary words land on the wrong speaker. Real recordings, which
 have pauses at turn changes, come out cleaner.
 
 ## Known limits
+
+- Recording uses the system default input device, and captures all other
+  apps' audio rather than one chosen app. macOS asks for microphone and
+  system-audio permission on the first recording; there is no API to tell
+  whether system audio was denied, so a denied tap simply records silence —
+  watch the system meter.
 
 - Long recordings are held in memory as 16 kHz mono `Float32` (~230 MB/hour)
   while the diarizer runs. Comfortable to about three hours.

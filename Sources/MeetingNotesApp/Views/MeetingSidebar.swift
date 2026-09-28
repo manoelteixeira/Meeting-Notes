@@ -31,6 +31,24 @@ struct MeetingSidebar: View {
         .navigationTitle("Meetings")
         .toolbar {
             ToolbarItem {
+                if model.recording.isRecording {
+                    Button {
+                        Task { await model.stopRecording() }
+                    } label: {
+                        Label("Stop Recording", systemImage: "stop.circle.fill")
+                    }
+                    .tint(.red)
+                    .help("Stop recording and process the meeting")
+                } else {
+                    Button {
+                        Task { await model.startRecording() }
+                    } label: {
+                        Label("Record Meeting", systemImage: "record.circle")
+                    }
+                    .help("Record the microphone and, optionally, the call's audio")
+                }
+            }
+            ToolbarItem {
                 Button {
                     isImporting = true
                 } label: {

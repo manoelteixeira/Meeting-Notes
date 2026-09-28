@@ -151,6 +151,60 @@ struct MeetingStoreTests {
         }
     }
 
+    @Test("Importing by move takes the file itself and leaves nothing behind")
+    func importMovesRecording() async throws {
+        try await withStore { store, _ in
+            let recording = try await store.makeRecordingURL()
+            #expect(recording.deletingLastPathComponent() == store.recordingsDirectory)
+            try AudioFixtures.writeSineCAF(to: recording, seconds: 1.5)
+
+            let meeting = try await store.importAudio(
+                from: recording, title: "Standup", transfer: .move
+            )
+
+            #expect(!FileManager.default.fileExists(atPath: recording.path))
+            #expect(FileManager.default.fileExists(atPath: store.audioURL(for: meeting).path))
+            #expect(meeting.title == "Standup")
+            #expect(meeting.audioFileName == "audio.caf")
+            #expect(abs(meeting.duration - 1.5) < 0.1)
+            #expect(await store.orphanedRecordings().isEmpty)
+            // The recordings folder is not a meeting.
+            #expect(try await store.loadAll().map(\.id) == [meeting.id])
+        }
+    }
+
+    @Test("A moved file that cannot be imported is put back where it was")
+    func failedMoveRestoresFile() async throws {
+        try await withStore { store, _ in
+            let recording = try await store.makeRecordingURL()
+            try Data("not audio".utf8).write(to: recording)
+
+            await #expect(throws: (any Error).self) {
+                try await store.importAudio(from: recording, transfer: .move)
+            }
+            #expect(FileManager.default.fileExists(atPath: recording.path))
+            #expect(try await store.loadAll().isEmpty)
+        }
+    }
+
+    @Test("Orphaned recordings are listed oldest first, ignoring other files")
+    func orphanedRecordings() async throws {
+        try await withStore { store, _ in
+            #expect(await store.orphanedRecordings().isEmpty)
+            let first = try await store.makeRecordingURL()
+            try AudioFixtures.writeSineCAF(to: first)
+            try FileManager.default.setAttributes(
+                [.creationDate: Date(timeIntervalSinceNow: -60)], ofItemAtPath: first.path
+            )
+            let second = try await store.makeRecordingURL()
+            try AudioFixtures.writeSineCAF(to: second)
+            try Data().write(to: store.recordingsDirectory.appending(path: "notes.txt"))
+
+            let orphans = await store.orphanedRecordings()
+            #expect(orphans.map(\.lastPathComponent) == [first, second].map(\.lastPathComponent))
+        }
+    }
+
     @Test("Importing a non-audio file fails without leaving a stray directory")
     func importRejectsNonAudio() async throws {
         try await withStore { store, root in

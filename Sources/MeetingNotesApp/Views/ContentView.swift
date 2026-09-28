@@ -15,7 +15,18 @@ struct ContentView: View {
                 if let meeting = model.selectedMeeting {
                     MeetingDetailView(model: model, meeting: meeting)
                 } else {
-                    EmptyLibraryView(isImporting: $isImporting)
+                    EmptyLibraryView(isImporting: $isImporting) {
+                        Task { await model.startRecording() }
+                    }
+                }
+            }
+            .safeAreaInset(edge: .top, spacing: 0) {
+                if model.recording.isRecording {
+                    RecordingBar(recording: model.recording) {
+                        Task { await model.stopRecording() }
+                    } onDiscard: {
+                        model.discardRecording()
+                    }
                 }
             }
             // Dropping onto the detail pane imports, whether or not a meeting is
@@ -55,15 +66,19 @@ struct ContentView: View {
 /// Shown when nothing is selected — including the very first launch.
 struct EmptyLibraryView: View {
     @Binding var isImporting: Bool
+    let onRecord: () -> Void
 
     var body: some View {
         ContentUnavailableView {
             Label("No meeting selected", systemImage: "waveform")
         } description: {
-            Text("Import a recording to transcribe it, identify who spoke, and write up the notes.")
+            Text("Record a meeting or import a recording to transcribe it, identify who spoke, and write up the notes.")
         } actions: {
-            Button("Import Recording…") { isImporting = true }
-                .buttonStyle(.borderedProminent)
+            HStack {
+                Button("Record Meeting", systemImage: "record.circle", action: onRecord)
+                    .buttonStyle(.borderedProminent)
+                Button("Import Recording…") { isImporting = true }
+            }
         }
     }
 }

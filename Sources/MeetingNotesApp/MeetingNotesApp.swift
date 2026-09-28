@@ -1,9 +1,11 @@
+import AppKit
 import MeetingNotesCore
 import SwiftUI
 
 @main
 struct MeetingNotesApp: App {
 
+    @NSApplicationDelegateAdaptor private var appDelegate: AppDelegate
     @State private var model: AppModel?
     @State private var launchError: String?
 
@@ -21,7 +23,9 @@ struct MeetingNotesApp: App {
             .frame(minWidth: 900, minHeight: 560)
         }
         .commands {
-            CommandGroup(replacing: .newItem) {}
+            CommandGroup(replacing: .newItem) {
+                RecordingCommands(model: model)
+            }
         }
 
         Settings {
@@ -37,9 +41,41 @@ struct MeetingNotesApp: App {
             let model = try AppModel.makeDefault()
             await model.load()
             self.model = model
+            appDelegate.model = model
         } catch {
             launchError = error.localizedDescription
         }
+    }
+}
+
+/// File › New Recording / Stop Recording.
+private struct RecordingCommands: View {
+    let model: AppModel?
+
+    var body: some View {
+        if let model, model.recording.isRecording {
+            Button("Stop Recording") { Task { await model.stopRecording() } }
+                .keyboardShortcut("r", modifiers: [.command, .shift])
+        } else {
+            Button("New Recording") { Task { await model?.startRecording() } }
+                .keyboardShortcut("r", modifiers: [.command, .shift])
+                .disabled(model == nil)
+        }
+    }
+}
+
+/// Keeps quitting from losing a recording in progress: the file is finalized
+/// and saved as a meeting before the app goes.
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    var model: AppModel?
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard let model, model.recording.isRecording else { return .terminateNow }
+        Task {
+            await model.stopRecording()
+            sender.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
     }
 }
 

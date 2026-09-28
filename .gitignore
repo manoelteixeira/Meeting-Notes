@@ -8,6 +8,6 @@ Tests/Fixtures/*.m4a
 Tests/Fixtures/*.aiff
 Tests/Fixtures/*.wav
 .DS_Store
-
+docs/
 # Coverage data dropped by test runs.
 default.profraw

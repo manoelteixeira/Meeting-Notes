@@ -30,6 +30,10 @@
 	<string></string>
 	<key>NSSpeechRecognitionUsageDescription</key>
 	<string>Meeting Notes transcribes your recordings on this Mac using Apple's on-device speech recognition. Audio is never uploaded.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Meeting Notes records your microphone when you record a meeting. The audio is saved and transcribed on this Mac and never uploaded.</string>
+	<key>NSAudioCaptureUsageDescription</key>
+	<string>Meeting Notes records what other apps are playing, such as the other side of a call, when you record a meeting. The audio is saved and transcribed on this Mac and never uploaded.</string>
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.productivity</string>
 	<key>CFBundleDocumentTypes</key>
