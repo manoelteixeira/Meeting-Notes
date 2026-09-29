@@ -38,9 +38,14 @@ public enum MarkdownExporter {
             lines.append("")
             lines.append("## Transcript")
             lines.append("")
-            for segment in meeting.transcript {
-                let name = meeting.displayName(forSpeaker: segment.speakerID)
-                lines.append("**[\(timestamp(segment.start))] \(name):** \(segment.text)")
+            for (index, segment) in meeting.transcript.enumerated() {
+                // A turn split at pauses names its speaker once, like the app.
+                if index > 0, meeting.transcript[index - 1].speakerID == segment.speakerID {
+                    lines.append("**[\(timestamp(segment.start))]** \(segment.text)")
+                } else {
+                    let name = meeting.displayName(forSpeaker: segment.speakerID)
+                    lines.append("**[\(timestamp(segment.start))] \(name):** \(segment.text)")
+                }
                 lines.append("")
             }
         }

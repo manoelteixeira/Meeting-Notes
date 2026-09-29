@@ -15,6 +15,73 @@ struct TranscriptMergerTests {
         }
     }
 
+    // MARK: - Assembling pre-attributed runs
+
+    @Test("Runs already labelled by speaker interleave by time and coalesce per turn")
+    func assembleInterleaves() {
+        let result = TranscriptMerger.assemble(
+            runsBySpeaker: [
+                ("B", [
+                    TimedTextRun(start: 5, end: 7, text: "Happy to be here."),
+                ]),
+                ("A", [
+                    TimedTextRun(start: 0, end: 2, text: "Hello everyone."),
+                    TimedTextRun(start: 2, end: 4, text: "Thanks for joining."),
+                    TimedTextRun(start: 10, end: 12, text: "Let's begin."),
+                ]),
+            ],
+            idGenerator: sequentialIDs()
+        )
+
+        #expect(result.segments.map(\.speakerID) == ["A", "B", "A"])
+        #expect(result.segments[0].text == "Hello everyone. Thanks for joining.")
+        #expect(result.segments[0].start == 0)
+        #expect(result.segments[0].end == 4)
+        #expect(result.segments[1].text == "Happy to be here.")
+        #expect(result.segments[2].text == "Let's begin.")
+        // Numbered by first appearance in time, not by input order.
+        #expect(result.speakers.map(\.id) == ["A", "B"])
+        #expect(result.speakers.map(\.displayName) == ["Speaker 1", "Speaker 2"])
+    }
+
+    @Test("Assembling honours the utterance break gap and drops blank runs")
+    func assembleBreaksAndBlanks() {
+        let result = TranscriptMerger.assemble(
+            runsBySpeaker: [
+                ("A", [
+                    TimedTextRun(start: 0, end: 1, text: "One."),
+                    TimedTextRun(start: 1.2, end: 2, text: "   "),
+                    TimedTextRun(start: 5, end: 6, text: "Two."),
+                ]),
+            ],
+            options: .init(utteranceBreakGap: 2),
+            idGenerator: sequentialIDs()
+        )
+        #expect(result.segments.map(\.text) == ["One.", "Two."])
+        #expect(result.speakers.count == 1)
+    }
+
+    @Test("Simultaneous runs keep the order the speakers were given in")
+    func assembleTieOrder() {
+        let result = TranscriptMerger.assemble(
+            runsBySpeaker: [
+                ("B", [TimedTextRun(start: 1, end: 2, text: "Yes.")]),
+                ("A", [TimedTextRun(start: 1, end: 2, text: "No.")]),
+            ],
+            idGenerator: sequentialIDs()
+        )
+        #expect(result.segments.map(\.speakerID) == ["B", "A"])
+    }
+
+    @Test("Assembling nothing yields nothing")
+    func assembleEmpty() {
+        let result = TranscriptMerger.assemble(runsBySpeaker: [("A", [])])
+        #expect(result.segments.isEmpty)
+        #expect(result.speakers.isEmpty)
+    }
+
+    // MARK: - Merging by overlap
+
     @Test("Alternating speakers produce one utterance per turn")
     func alternatingSpeakers() {
         let runs = [
@@ -165,7 +232,7 @@ struct TranscriptMergerTests {
     @Test("Out-of-order runs are sorted before merging")
     func runsAreSorted() {
         let runs = [
-            TimedTextRun(start: 4, end: 5, text: "Second."),
+            TimedTextRun(start: 1.5, end: 2.5, text: "Second."),
             TimedTextRun(start: 0, end: 1, text: "First."),
         ]
         let diarization = [DiarizedSegment(speakerID: "A", start: 0, end: 6)]
@@ -175,7 +242,7 @@ struct TranscriptMergerTests {
         #expect(result.segments.count == 1)
         #expect(result.segments[0].text == "First. Second.")
         #expect(result.segments[0].start == 0)
-        #expect(result.segments[0].end == 5)
+        #expect(result.segments[0].end == 2.5)
     }
 
     @Test("Punctuation-leading fragments join without a stray space")
@@ -308,6 +375,55 @@ struct TranscriptMergerTests {
             TranscriptMerger.snappingBoundariesToPauses(diarization, runs: runs, tolerance: 0)
                 == diarization
         )
+    }
+
+    @Test("A long pause splits a same-speaker turn")
+    func longPauseStartsNewUtterance() {
+        let runs = [
+            TimedTextRun(start: 0, end: 1, text: "First thought."),
+            TimedTextRun(start: 1.2, end: 2, text: "Still going."),
+            TimedTextRun(start: 4, end: 5, text: "After a pause."),
+        ]
+        let diarization = [DiarizedSegment(speakerID: "A", start: 0, end: 5)]
+
+        let result = TranscriptMerger.merge(runs: runs, diarization: diarization)
+
+        #expect(result.segments.map(\.text) == ["First thought. Still going.", "After a pause."])
+        #expect(result.segments.allSatisfy { $0.speakerID == "A" })
+        #expect(result.speakers.count == 1)
+    }
+
+    @Test("An infinite break gap coalesces a whole turn")
+    func infiniteBreakGapKeepsOneUtterance() {
+        let runs = [
+            TimedTextRun(start: 0, end: 1, text: "First thought."),
+            TimedTextRun(start: 4, end: 5, text: "After a pause."),
+        ]
+        let diarization = [DiarizedSegment(speakerID: "A", start: 0, end: 5)]
+
+        let result = TranscriptMerger.merge(
+            runs: runs,
+            diarization: diarization,
+            options: .init(utteranceBreakGap: .infinity, maxUtteranceDuration: .infinity)
+        )
+
+        #expect(result.segments.map(\.text) == ["First thought. After a pause."])
+    }
+
+    @Test("A long utterance ends at the next sentence end")
+    func longUtteranceSplitsAtSentenceEnd() {
+        let runs = [
+            TimedTextRun(start: 0, end: 20, text: "We shipped"),
+            TimedTextRun(start: 20, end: 31, text: "the build,"),
+            TimedTextRun(start: 31, end: 32, text: "on time."),
+            TimedTextRun(start: 32, end: 33, text: "Next topic."),
+        ]
+        let diarization = [DiarizedSegment(speakerID: "A", start: 0, end: 33)]
+
+        let result = TranscriptMerger.merge(runs: runs, diarization: diarization)
+
+        // Past 30 s at "the build," it keeps going to the sentence end.
+        #expect(result.segments.map(\.text) == ["We shipped the build, on time.", "Next topic."])
     }
 
     @Test("Custom speaker names survive a reprocess")

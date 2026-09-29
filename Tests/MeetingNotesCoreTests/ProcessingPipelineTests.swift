@@ -20,12 +20,13 @@ struct ProcessingPipelineTests {
     /// Builds a store with one importable meeting backed by a real audio file,
     /// since the pipeline decodes before anything else.
     private func withFixture(
+        seconds: Double = 1.0,
         _ body: (MeetingStore, Meeting) async throws -> Void
     ) async throws {
         let root = try AudioFixtures.makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
         let source = root.appending(path: "Weekly.wav", directoryHint: .notDirectory)
-        try AudioFixtures.writeSineWAV(to: source, seconds: 1.0)
+        try AudioFixtures.writeSineWAV(to: source, seconds: seconds)
 
         let store = try MeetingStore(
             rootDirectory: root.appending(path: "library", directoryHint: .isDirectory)
@@ -154,7 +155,8 @@ struct ProcessingPipelineTests {
                 diarization: diarization,
                 notes: noModel
             ).process(meeting)
-            #expect(transcription.calls.withLock { $0.transcribeCount } == 1)
+            // One transcription pass per speaker.
+            #expect(transcription.calls.withLock { $0.transcribeCount } == 2)
 
             // Second pass with a model must reuse the transcript it already has.
             processed = try await makePipeline(
@@ -166,7 +168,7 @@ struct ProcessingPipelineTests {
 
             #expect(processed.status == .completed)
             #expect(processed.notesMarkdown == "## Summary\n\nDone.")
-            #expect(transcription.calls.withLock { $0.transcribeCount } == 1)
+            #expect(transcription.calls.withLock { $0.transcribeCount } == 2)
             #expect(diarization.diarizeCount.withLock { $0 } == 1)
         }
     }
@@ -186,7 +188,8 @@ struct ProcessingPipelineTests {
             let first = try await pipeline.process(meeting)
             _ = try await pipeline.process(first, options: .init(forceReprocess: true))
 
-            #expect(transcription.calls.withLock { $0.transcribeCount } == 2)
+            // Two speakers, two runs: four transcription passes.
+            #expect(transcription.calls.withLock { $0.transcribeCount } == 4)
             #expect(diarization.diarizeCount.withLock { $0 } == 2)
         }
     }
@@ -270,6 +273,215 @@ struct ProcessingPipelineTests {
             let recorded = events.withLock { $0 }
             let finished = Set(recorded.filter { $0.kind == .finished }.map(\.stage))
             #expect(finished == [.decoded, .transcribed, .diarized, .merged])
+
+            // Speakers are identified before any transcription starts.
+            let diarizedDone = recorded.firstIndex {
+                $0.stage == .diarized && $0.kind == .finished
+            }
+            let transcribing = recorded.firstIndex {
+                if case .running = $0.kind { return $0.stage == .transcribed }
+                return false
+            }
+            #expect(try #require(diarizedDone) < #require(transcribing))
+            #expect(recorded.contains { $0.detail == "Transcribing Speaker 2 of 2" })
+        }
+    }
+
+    // MARK: - Per-speaker transcription
+
+    @Test("Each speaker's own track is transcribed and the words interleave by time")
+    func perSpeakerTracks() async throws {
+        try await withFixture { store, meeting in
+            let transcription = StubTranscriptionService(runsByFileName: [
+                "A.wav": [
+                    TimedTextRun(start: 0, end: 1.5, text: "Thanks for joining."),
+                    TimedTextRun(start: 3.6, end: 4, text: "Great."),
+                ],
+                "B.wav": [TimedTextRun(start: 2.0, end: 3.5, text: "Happy to be here.")],
+            ])
+            let turns = [
+                DiarizedSegment(speakerID: "A", start: 0, end: 1.75),
+                DiarizedSegment(speakerID: "B", start: 1.75, end: 3.5),
+                DiarizedSegment(speakerID: "A", start: 3.5, end: 4),
+            ]
+            let pipeline = makePipeline(
+                store: store,
+                transcription: transcription,
+                diarization: StubDiarizationService(segments: turns),
+                notes: noModel
+            )
+
+            let processed = try await pipeline.process(meeting)
+
+            #expect(transcription.calls.withLock { $0.audioFileNames } == ["A.wav", "B.wav"])
+            #expect(processed.transcript.map(\.text) == ["Thanks for joining.", "Happy to be here.", "Great."])
+            #expect(processed.transcript.map(\.speakerID) == ["A", "B", "A"])
+            #expect(processed.speakers.map(\.displayName) == ["Speaker 1", "Speaker 2"])
+        }
+    }
+
+    @Test("Words recognized in a speaker's muted stretches are dropped")
+    func hallucinatedRunsAreDropped() async throws {
+        try await withFixture { store, meeting in
+            let transcription = StubTranscriptionService(runsByFileName: [
+                "A.wav": [
+                    TimedTextRun(start: 0, end: 1.5, text: "Thanks for joining."),
+                    // A has nothing after 1.75 s (+ padding); this is noise.
+                    TimedTextRun(start: 3.0, end: 3.4, text: "Thank you."),
+                ],
+                "B.wav": [TimedTextRun(start: 2.0, end: 3.5, text: "Happy to be here.")],
+            ])
+            let pipeline = makePipeline(
+                store: store,
+                transcription: transcription,
+                diarization: StubDiarizationService(segments: segments),
+                notes: noModel
+            )
+
+            let processed = try await pipeline.process(meeting)
+            #expect(processed.transcript.map(\.text) == ["Thanks for joining.", "Happy to be here."])
+        }
+    }
+
+    @Test("A word bleeding through the padding is credited to its own speaker once")
+    func paddingBleedIsNotDuplicated() async throws {
+        try await withFixture { store, meeting in
+            // B's first word starts right at the boundary, so A's padded
+            // track hears it too.
+            let transcription = StubTranscriptionService(runsByFileName: [
+                "A.wav": [
+                    TimedTextRun(start: 0, end: 1.5, text: "Thanks for joining."),
+                    TimedTextRun(start: 1.8, end: 1.95, text: "Happy"),
+                ],
+                "B.wav": [TimedTextRun(start: 1.8, end: 3.5, text: "Happy to be here.")],
+            ])
+            let pipeline = makePipeline(
+                store: store,
+                transcription: transcription,
+                diarization: StubDiarizationService(segments: segments),
+                notes: noModel
+            )
+
+            let processed = try await pipeline.process(meeting)
+            #expect(processed.transcript.map(\.text) == ["Thanks for joining.", "Happy to be here."])
+            #expect(processed.transcript.map(\.speakerID) == ["A", "B"])
+        }
+    }
+
+    @Test("The same word heard on both tracks with straddling timestamps appears once")
+    func straddlingBleedIsNotDuplicated() async throws {
+        try await withFixture { store, meeting in
+            let transcription = StubTranscriptionService(runsByFileName: [
+                "A.wav": [
+                    TimedTextRun(start: 0, end: 1.5, text: "Thanks for joining."),
+                    // Overlaps A's own turn (ends 1.75) as well as B's.
+                    TimedTextRun(start: 1.6, end: 2.0, text: "Happy."),
+                ],
+                "B.wav": [TimedTextRun(start: 1.75, end: 2.1, text: "Happy.")],
+            ])
+            let pipeline = makePipeline(
+                store: store,
+                transcription: transcription,
+                diarization: StubDiarizationService(segments: segments),
+                notes: noModel
+            )
+
+            let processed = try await pipeline.process(meeting)
+            #expect(processed.transcript.map(\.text) == ["Thanks for joining.", "Happy."])
+            #expect(processed.transcript.map(\.speakerID) == ["A", "B"])
+        }
+    }
+
+    @Test("Audible speech the diarizer missed is transcribed once more and attributed by proximity")
+    func leftoverSpeechIsTranscribed() async throws {
+        // A 4 s tone with only its first second diarized: three seconds of
+        // sound nobody covers earns a leftover pass.
+        try await withFixture(seconds: 4.0) { store, meeting in
+            let transcription = StubTranscriptionService(runsByFileName: [
+                "A.wav": [TimedTextRun(start: 0, end: 0.9, text: "Thanks for joining.")],
+                "\(Speaker.unknownID).wav": [
+                    // Within a second of A's turn: A's.
+                    TimedTextRun(start: 1.8, end: 2.2, text: "Nearly."),
+                    // Far from anyone: unknown.
+                    TimedTextRun(start: 3.4, end: 3.9, text: "Who said this?"),
+                ],
+            ])
+            let pipeline = makePipeline(
+                store: store,
+                transcription: transcription,
+                diarization: StubDiarizationService(segments: [
+                    DiarizedSegment(speakerID: "A", start: 0, end: 1)
+                ]),
+                notes: noModel
+            )
+
+            let processed = try await pipeline.process(meeting)
+
+            #expect(transcription.calls.withLock { $0.audioFileNames } == ["A.wav", "unknown.wav"])
+            // "Nearly." joins A's utterance, since the same speaker continued
+            // within the break gap.
+            #expect(processed.transcript.map(\.text) == ["Thanks for joining. Nearly.", "Who said this?"])
+            #expect(processed.transcript.map(\.speakerID) == ["A", Speaker.unknownID])
+            #expect(processed.speakers.map(\.displayName) == ["Speaker 1", "Unknown speaker"])
+        }
+    }
+
+    @Test("A recording the diarizer hears nothing in is transcribed once as one speaker")
+    func noSegmentsStillTranscribes() async throws {
+        try await withFixture { store, meeting in
+            let transcription = StubTranscriptionService(runs: [
+                TimedTextRun(start: 0, end: 0.8, text: "Just me.")
+            ])
+            let pipeline = makePipeline(
+                store: store,
+                transcription: transcription,
+                diarization: StubDiarizationService(segments: []),
+                notes: noModel
+            )
+
+            let processed = try await pipeline.process(meeting)
+            #expect(transcription.calls.withLock { $0.transcribeCount } == 1)
+            #expect(processed.transcript.map(\.text) == ["Just me."])
+            #expect(processed.speakers.map(\.displayName) == ["Speaker 1"])
+        }
+    }
+
+    @Test("Only silence-noise on every track counts as no speech")
+    func allRunsFilteredIsEmptyTranscript() async throws {
+        try await withFixture { store, meeting in
+            let pipeline = makePipeline(
+                store: store,
+                transcription: StubTranscriptionService(runsByFileName: [
+                    "A.wav": [TimedTextRun(start: 3.0, end: 3.4, text: "Thank you.")],
+                    "B.wav": [TimedTextRun(start: 0, end: 0.5, text: "Thank you.")],
+                ]),
+                diarization: StubDiarizationService(segments: segments),
+                notes: noModel
+            )
+
+            await #expect(throws: PipelineError.self) {
+                try await pipeline.process(meeting)
+            }
+            let reloaded = try await store.load(id: meeting.id)
+            #expect(reloaded.status == .failed(code: .transcriptionFailed, message: "No speech was recognized in this recording."))
+        }
+    }
+
+    @Test("The per-speaker tracks do not outlive the run")
+    func trackFilesAreRemoved() async throws {
+        try await withFixture { store, meeting in
+            let pipeline = makePipeline(
+                store: store,
+                transcription: StubTranscriptionService(runs: runs),
+                diarization: StubDiarizationService(segments: segments),
+                notes: noModel
+            )
+            _ = try await pipeline.process(meeting)
+
+            let leftovers = try FileManager.default
+                .contentsOfDirectory(atPath: FileManager.default.temporaryDirectory.path)
+                .filter { $0.hasPrefix("meeting-notes-tracks-") }
+            #expect(leftovers.isEmpty)
         }
     }
 

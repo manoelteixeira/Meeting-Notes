@@ -23,6 +23,8 @@ struct CLI {
                 try await runTranscribe(Arguments(Array(arguments.dropFirst())))
             case "diarize":
                 try await runDiarize(Arguments(Array(arguments.dropFirst())))
+            case "tracks":
+                try await runTracks(Arguments(Array(arguments.dropFirst())))
             case "models":
                 try await runModels(Arguments(Array(arguments.dropFirst())))
             case "-h", "--help", "help":
@@ -53,8 +55,10 @@ struct CLI {
         let (store, meeting) = try await makeScratchMeeting(for: audioURL, locale: locale)
         defer { try? FileManager.default.removeItem(at: store.root) }
 
+        // No speaker directory here, so no voiceprint pass either.
         let pipeline = ProcessingPipeline(
             store: store,
+            diarization: try engine(arguments).makeService(withVoiceprints: false),
             notes: MLXNotesService(model: notesModel(arguments)),
             notesTemplate: notesTemplate(arguments)
         )
@@ -119,27 +123,109 @@ struct CLI {
         let audioURL = try arguments.requirePath()
         let decoded = try await AudioDecoder.decodeMono16k(url: audioURL)
 
-        let service = FluidAudioDiarizationService()
+        // Tuning overrides. Sortformer: `--min-on <s>`, `--min-off <s>`.
+        // pyannote: `--cluster-threshold <x>`, `--num-speakers <n>`,
+        // `--min-speakers <n>`, `--max-speakers <n>`, `--fa <x>`, `--fb <x>`.
+        // `--voiceprints` adds the pyannote pass the app runs for recognition.
+        let service: any DiarizationService
+        switch try engine(arguments) {
+        case .sortformer:
+            let sortformer = SortformerDiarizationService(
+                minDurationOn: arguments.value("min-on").flatMap(Float.init),
+                minDurationOff: arguments.value("min-off").flatMap(Float.init)
+            )
+            service = arguments.flag("voiceprints")
+                ? VoiceprintAugmentedDiarizationService(
+                    primary: sortformer,
+                    voiceprints: FluidAudioDiarizationService()
+                )
+                : sortformer
+        case .pyannote:
+            if arguments.flag("voiceprints") {
+                FileHandle.standardError.write(
+                    Data("--voiceprints is implied for pyannote, which produces its own.\n".utf8)
+                )
+            }
+            service = FluidAudioDiarizationService(
+                clusteringThreshold: arguments.value("cluster-threshold").flatMap(Double.init),
+                numSpeakers: arguments.value("num-speakers").flatMap(Int.init),
+                minSpeakers: arguments.value("min-speakers").flatMap(Int.init),
+                maxSpeakers: arguments.value("max-speakers").flatMap(Int.init),
+                Fa: arguments.value("fa").flatMap(Double.init),
+                Fb: arguments.value("fb").flatMap(Double.init)
+            )
+        }
         let reporter = ProgressReporter()
         try await service.prepare { fraction in
             reporter.report(PipelineProgress(stage: .diarized, kind: .downloadingModels(fraction)))
         }
-        let segments = try await service.diarize(samples: decoded.samples) { fraction in
+        let output = try await service.diarize(samples: decoded.samples) { fraction in
             reporter.report(PipelineProgress(stage: .diarized, kind: .running(fraction)))
-        }.segments
+        }
         reporter.finish()
 
         print("")
-        for segment in segments {
+        for segment in output.segments {
             print(
                 "\(MarkdownExporter.timestamp(segment.start))–"
                     + "\(MarkdownExporter.timestamp(segment.end))  \(segment.speakerID)"
             )
         }
-        let speakers = Set(segments.map(\.speakerID)).count
+        let speakers = Set(output.segments.map(\.speakerID)).count
+        let voiceprints = output.speakerEmbeddings.keys.sorted().joined(separator: ", ")
         FileHandle.standardError.write(
-            Data("\n\(segments.count) segments across \(speakers) speakers.\n".utf8)
+            Data(
+                ("\n\(output.segments.count) segments across \(speakers) speakers."
+                    + (voiceprints.isEmpty ? "" : " Voiceprints for: \(voiceprints).") + "\n").utf8
+            )
         )
+    }
+
+    /// Writes the per-speaker tracks the pipeline transcribes, for listening
+    /// to or running `transcribe` on.
+    private static func runTracks(_ arguments: Arguments) async throws {
+        let audioURL = try arguments.requirePath()
+        guard let output = arguments.value("output") else {
+            throw PipelineError(code: .unsupportedAudio, message: "tracks needs --output <directory>.")
+        }
+        let directory = URL(fileURLWithPath: (output as NSString).expandingTildeInPath, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+
+        let decoded = try await AudioDecoder.decodeMono16k(url: audioURL)
+        let service = try engine(arguments).makeService(withVoiceprints: false)
+        let reporter = ProgressReporter()
+        let found = try await service.diarize(samples: decoded.samples) { fraction in
+            reporter.report(PipelineProgress(stage: .diarized, kind: .running(fraction)))
+        }.segments
+        reporter.finish()
+        // Same fallback as the pipeline: nothing found still means one track.
+        let segments = found.isEmpty
+            ? [DiarizedSegment(speakerID: "S1", start: 0, end: decoded.duration)]
+            : found
+
+        var tracks = SpeakerTrackBuilder.speakerOrder(segments).map { speakerID in
+            SpeakerTrackBuilder.track(
+                for: speakerID,
+                segments: segments,
+                samples: decoded.samples,
+                sampleRate: decoded.sampleRate
+            )
+        }
+        if let leftover = SpeakerTrackBuilder.leftoverTrack(
+            segments: segments, samples: decoded.samples, sampleRate: decoded.sampleRate
+        ) {
+            tracks.append(leftover)
+        }
+
+        print("")
+        for track in tracks {
+            let url = directory.appending(path: "\(track.speakerID).wav", directoryHint: .notDirectory)
+            try AudioFileWriter.writeMonoWAV(samples: track.samples, sampleRate: decoded.sampleRate, to: url)
+            let spans = track.spans
+                .map { "\(MarkdownExporter.timestamp($0.lowerBound))–\(MarkdownExporter.timestamp($0.upperBound))" }
+                .joined(separator: ", ")
+            print("\(url.lastPathComponent)  \(spans)")
+        }
     }
 
     private static func runModels(_ arguments: Arguments) async throws {
@@ -178,7 +264,7 @@ struct CLI {
             try await SpeechModelManager.ensureModel(for: locale) { fraction in
                 reporter.report(PipelineProgress(stage: .transcribed, kind: .downloadingModels(fraction)))
             }
-            try await FluidAudioDiarizationService().prepare { fraction in
+            try await engine(arguments).makeService(withVoiceprints: false).prepare { fraction in
                 reporter.report(PipelineProgress(stage: .diarized, kind: .downloadingModels(fraction)))
             }
             reporter.finish()
@@ -190,6 +276,20 @@ struct CLI {
     }
 
     // MARK: - Helpers
+
+    /// `--engine sortformer|pyannote`, defaulting to the app's default. Unlike
+    /// the model ids, a typo here would silently run the wrong model, so it fails.
+    private static func engine(_ arguments: Arguments) throws -> DiarizationEngine {
+        guard let raw = arguments.value("engine") else { return .default }
+        guard let engine = DiarizationEngine(rawValue: raw) else {
+            let known = DiarizationEngine.allCases.map(\.rawValue).joined(separator: ", ")
+            throw PipelineError(
+                code: .diarizationFailed,
+                message: "Unknown speaker engine '\(raw)'. Choose one of: \(known)."
+            )
+        }
+        return engine
+    }
 
     /// `--notes-model <id>`, defaulting to the catalog's default. Unknown ids
     /// fall back rather than failing, matching how `--locale` behaves.
@@ -240,17 +340,29 @@ struct CLI {
               meeting-notes-cli process <audio-file> [--notes] [--notes-model <id>]
                                         [--notes-sections "<a,b,c>"]
                                         [--notes-instructions "<text>"]
+                                        [--engine sortformer|pyannote]
                                         [--locale <bcp47>] [--output <file.md>]
               meeting-notes-cli transcribe <audio-file> [--locale <bcp47>]
-              meeting-notes-cli diarize <audio-file>
+              meeting-notes-cli diarize <audio-file> [--engine sortformer|pyannote]
+                                        sortformer: [--min-on <s>] [--min-off <s>]
+                                                    [--voiceprints]
+                                        pyannote:   [--cluster-threshold <x>]
+                                        [--num-speakers <n>] [--min-speakers <n>]
+                                        [--max-speakers <n>] [--fa <x>] [--fb <x>]
+              meeting-notes-cli tracks <audio-file> --output <directory>
+                                       [--engine sortformer|pyannote]
               meeting-notes-cli models [--locale <bcp47>] [--download]
+                                       [--engine sortformer|pyannote]
                                        [--download-notes-model] [--notes-model <id>]
 
             COMMANDS
-              process     Decode, transcribe, diarize and merge, then print Markdown.
-                          Add --notes to also write the notes with the local model.
+              process     Decode, identify speakers, transcribe each speaker's own
+                          audio and interleave, then print Markdown. Add --notes to
+                          also write the notes with the local model.
               transcribe  Print the raw timed text runs from on-device speech recognition.
               diarize     Print the speaker segments found by local diarization.
+              tracks      Write the per-speaker audio tracks the pipeline transcribes,
+                          one WAV per speaker with everyone else muted.
               models      Show on-device model status; --download fetches the speech and
                           speaker models, --download-notes-model fetches the notes model.
 

@@ -23,10 +23,13 @@ offline, and neither the audio nor the transcript leaves the machine.
   picker. Anything AVFoundation can decode works — m4a, mp3, wav, and the rest.
 - **On-device transcription** with Apple's `SpeechAnalyzer`, with word-level
   timestamps. The transcription language is selectable in Settings.
-- **Speaker identification** with FluidAudio, merged with the transcript into a
-  speaker-attributed record of who said what. Speakers arrive numbered by first
-  appearance and can be renamed inline in the transcript — the name applies
-  everywhere at once.
+- **Speaker identification first, then transcription per speaker.** FluidAudio's
+  Sortformer model works out who spoke when; each speaker's own audio is then
+  transcribed on its own, so every word arrives already attributed and a
+  one-word reply is never swallowed by the person talking around it. Speakers
+  arrive numbered by first appearance and can be renamed inline in the
+  transcript — the name applies everywhere at once. Settings › Transcription
+  can switch to the pyannote pipeline instead.
 - **Voices recognized across meetings.** Name a speaker once and the next
   recording of the same voice gets that name automatically; renaming them
   anywhere renames them in every meeting. Voiceprints are derived on-device and
@@ -125,9 +128,15 @@ Anything that does not write notes runs straight from SwiftPM:
 swift run meeting-notes-cli process recording.m4a      # transcript only
 swift run meeting-notes-cli transcribe recording.m4a   # raw timed text runs
 swift run meeting-notes-cli diarize recording.m4a      # speaker segments only
+swift run meeting-notes-cli tracks recording.m4a --output tracks/   # one WAV per speaker
 swift run meeting-notes-cli models                     # what is installed
 swift run meeting-notes-cli models --download          # pre-fetch speech + speaker
 ```
+
+`process`, `diarize`, `tracks` and `models` take `--engine sortformer|pyannote`
+(default Sortformer); `diarize` also accepts `--voiceprints` to run the
+recognition pass alongside Sortformer, and per-engine tuning flags listed in
+`--help`.
 
 `--notes` needs the Metal shaders, so it has to be an `xcodebuild` binary. Build
 it once:
@@ -167,54 +176,72 @@ clean file.
 ```
 audio file
    │
-   ├── AVFoundation ──────────────► 16 kHz mono PCM ──┐
-   │   AVAudioFile, or AVAssetReader                  │
-   │   for containers it rejects                      │
-   │                                                  ▼
-   ├── SpeechAnalyzer ────────────► timed text    FluidAudio ──► speaker spans
-   │   on-device, word-level         runs          on-device,
-   │   timestamps                                  CoreML/ANE
-   │                                    │               │
-   │                                    └──── merge ────┘
-   │                                            │
+   ├── AVFoundation ──────────────► 16 kHz mono PCM
+   │   AVAudioFile, or AVAssetReader        │
+   │   for containers it rejects            ▼
+   │                                  FluidAudio ──────► speaker spans
+   │                                  Sortformer (or          │
+   │                                  pyannote), CoreML       ▼
+   │                                              one masked track per speaker
+   │                                              (everyone else silenced,
+   │                                               timeline intact)
+   │                                                          │
+   │                                  SpeechAnalyzer ◄────────┘  once per track
+   │                                  on-device, word-level
+   │                                  timestamps
+   │                                              │
+   │                                  interleave by time
+   │                                              │
    │                              speaker-attributed transcript
-   │                                            │
-   └───────────────────────────────► Qwen3 ─────┘  (MLX, on the GPU)
+   │                                              │
+   └───────────────────────────────► Qwen3 ───────┘  (MLX, on the GPU)
                                        │
                                   Markdown notes
 ```
 
-Transcription and diarization read the same audio independently, so they run
-concurrently.
+### Why speakers come first
 
-### Merging is the interesting part
+A clustering diarizer works on ten-second windows, and a voice that only ever
+says "yes" for half a second inside someone else's window never gets a slot of
+its own — it is simply absorbed. Sortformer is end-to-end and does give such a
+reply its own span, and once the spans are known the cleanest way to attribute
+words is not to reconcile two timelines after the fact but to let the
+recognizer hear one speaker at a time:
 
-The transcriber knows *what* was said and exactly when, down to the word. The
-diarizer knows *who* was speaking, but only to within a few hundred
-milliseconds. `TranscriptMerger` reconciles them:
+1. `SpeakerTrackBuilder` cuts one full-length track per speaker: that
+   speaker's spans, padded a quarter second each side so a change localized
+   slightly late never clips a first word, with everyone else muted and the
+   edges faded. Overlapping speech lands in every track it belongs to.
+2. Each track goes through `SpeechAnalyzer` on its own. Because the track is
+   full length, word timestamps already sit on the meeting's timeline.
+3. Words the recognizer finds in the muted stretches are hallucinations and
+   are dropped; a word caught in the padding that sits on another speaker's
+   turn is theirs, and the same word heard on two tracks at once goes to the
+   speaker whose turn contains its end (diarizers mark a change late, not
+   early).
+4. Audio no speaker covers is measured against the loudness of the speech
+   that was found; if at least a second of comparable sound is sitting there,
+   the diarizer missed it, and that leftover audio gets one more pass whose
+   words go to the nearest speaker within a second or to "Unknown speaker".
+5. `TranscriptMerger.assemble` interleaves the speakers' runs by time,
+   coalesces consecutive runs from one speaker into utterances, and numbers
+   speakers by first appearance.
 
-1. Each speaker-change boundary is nudged onto a nearby pause between words,
-   preferring the longest pause — a turn change almost always carries more
-   silence than a gap mid-sentence. Without this, the first word of a new turn
-   routinely lands on the previous speaker.
-2. Each word is then assigned to the speaker whose span overlaps it most.
-3. A run that genuinely straddles a change is split at a word boundary, never
-   mid-word.
-4. A run overlapping nothing attaches to the nearest speaker within a second,
-   and otherwise becomes "Unknown speaker".
-5. Consecutive runs from one speaker coalesce into utterances, and speakers are
-   numbered by first appearance.
-
-It is a pure function over two arrays, which is why it carries the bulk of the
-tests.
+The cost is one recognition pass per speaker rather than one per meeting.
+`TranscriptMerger.merge`, the earlier overlap-based reconciliation, remains as a
+pure, heavily tested function.
 
 ## Speaker recognition
 
 The diarizer labels speakers per recording — the same person is "S1" today and
 "S3" tomorrow. To connect them, the app keeps a small directory of people known
-by voice. Each diarization run also yields a compact numeric voiceprint per
-speaker (a 256-dimension embedding); after merging, every speaker who talked
-long enough is compared against the directory by cosine distance. A confident
+by voice. The pyannote pipeline yields a compact numeric voiceprint per speaker
+(a 256-dimension embedding); Sortformer does not, so while recognition is on
+the app runs the pyannote pass alongside it and carries each voiceprint over to
+the Sortformer speaker whose speech it covers — only when the match is
+one-to-one, since a pyannote cluster that spans two Sortformer speakers is a
+blend of both voices. Every speaker who talked long enough is then compared
+against the directory by cosine distance. A confident
 match links the speaker to that person and applies their name; an unfamiliar
 voice is enrolled as a new, unnamed person whose record improves as more
 meetings are heard.
@@ -267,9 +294,10 @@ the app: deleting it leaves the weights behind for whatever else uses them.
 ```
 Sources/
   MeetingNotesCore/     all the logic, no UI — unit-testable
-    Audio/              decode to 16 kHz mono
+    Audio/              decode to 16 kHz mono, cut per-speaker tracks, write WAV
     Transcription/      TranscriptionService protocol + the Apple implementation
-    Diarization/        DiarizationService protocol + the FluidAudio implementation
+    Diarization/        DiarizationService protocol, Sortformer and pyannote
+                        implementations, voiceprint carry-over between them
     Merge/              TranscriptMerger — pure, heavily tested
     Recognition/        SpeakerRecognizer — matches voiceprints across meetings
     Notes/              NotesService protocol, MLX implementation, model catalog
@@ -319,7 +347,12 @@ have pauses at turn changes, come out cleaner.
   watch the system meter.
 
 - Long recordings are held in memory as 16 kHz mono `Float32` (~230 MB/hour)
-  while the diarizer runs. Comfortable to about three hours.
+  while the diarizer runs, and each speaker's track is written to a temporary
+  WAV of the same length (~115 MB/hour) for its transcription pass, one at a
+  time. Comfortable to about three hours.
+- Transcription runs once per speaker, so a four-person meeting takes about
+  four times as long to transcribe as a monologue. Sortformer follows at most
+  four speakers; a fifth voice is folded into one of the four.
 - On first use the app downloads the speech model and the diarization models,
   and Settings downloads a notes model. After that everything works offline.
 - Notes are written by a 4-bit quantized Qwen3 (1.7B, 4B or 8B) with a

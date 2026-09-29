@@ -9,7 +9,7 @@ struct ProcessingView: View {
 
     /// `.imported` is not work, so it is not shown.
     private static let visibleStages: [ProcessingStage] =
-        [.decoded, .transcribed, .diarized, .merged, .noted]
+        [.decoded, .diarized, .transcribed, .merged, .noted]
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {

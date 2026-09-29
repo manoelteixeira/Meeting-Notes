@@ -257,6 +257,12 @@ private struct TranscriptionSettings: View {
                     }
                 }
 
+                Picker("Speaker model", selection: $model.diarizationEngine) {
+                    ForEach(DiarizationEngine.allCases) { engine in
+                        Text(engine.displayName).tag(engine)
+                    }
+                }
+
                 LabeledContent("Speaker models") {
                     Text(model.diarizationModelsReady ? "Ready" : "Downloaded on first use")
                         .foregroundStyle(.secondary)
@@ -266,7 +272,9 @@ private struct TranscriptionSettings: View {
             } footer: {
                 Text(
                     "Transcription and speaker identification run entirely on this Mac. "
-                        + "Models are downloaded once, then work offline."
+                        + "Models are downloaded once, then work offline. "
+                        + "Sortformer follows up to four speakers and catches short replies; "
+                        + "recognizing voices across meetings runs the pyannote model alongside it."
                 )
                 .font(.caption)
                 .foregroundStyle(.secondary)

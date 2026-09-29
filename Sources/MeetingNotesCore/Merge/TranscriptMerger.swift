@@ -35,17 +35,29 @@ public enum TranscriptMerger {
         /// How far a speaker-change boundary may be nudged to land in a pause
         /// between words. Set to zero to disable snapping.
         public var boundarySnapTolerance: TimeInterval
+        /// A pause at least this long starts a new utterance even when the
+        /// speaker does not change, so one mislabeled stretch never swallows
+        /// minutes of conversation. Set to `.infinity` to disable.
+        public var utteranceBreakGap: TimeInterval
+        /// Once an utterance runs this long it ends at the next sentence end,
+        /// which bounds blocks in continuous speech that has no long pauses.
+        /// Set to `.infinity` to disable.
+        public var maxUtteranceDuration: TimeInterval
 
         public init(
             nearestNeighborTolerance: TimeInterval = 1.0,
             splitShareThreshold: Double = 0.25,
             minimumSplitDuration: TimeInterval = 0.2,
-            boundarySnapTolerance: TimeInterval = 0.75
+            boundarySnapTolerance: TimeInterval = 0.75,
+            utteranceBreakGap: TimeInterval = 1.5,
+            maxUtteranceDuration: TimeInterval = 30
         ) {
             self.nearestNeighborTolerance = nearestNeighborTolerance
             self.splitShareThreshold = splitShareThreshold
             self.minimumSplitDuration = minimumSplitDuration
             self.boundarySnapTolerance = boundarySnapTolerance
+            self.utteranceBreakGap = utteranceBreakGap
+            self.maxUtteranceDuration = maxUtteranceDuration
         }
 
         public static let `default` = Options()
@@ -86,7 +98,40 @@ public enum TranscriptMerger {
             pieces.append(contentsOf: attribute(run: run, to: refinedSegments, options: options))
         }
 
-        let utterances = coalesce(pieces, idGenerator: idGenerator)
+        let utterances = coalesce(pieces, options: options, idGenerator: idGenerator)
+        return MergeResult(segments: utterances, speakers: numberSpeakers(in: utterances))
+    }
+
+    /// Assembles runs that already carry their speaker, as produced by
+    /// transcribing one masked track per speaker, into utterances.
+    ///
+    /// Runs are interleaved by start time (ties keep the order of
+    /// `runsBySpeaker`), then coalesced exactly like `merge` does; overlapping
+    /// speech therefore yields two adjacent utterances rather than one.
+    public static func assemble(
+        runsBySpeaker: [(speakerID: String, runs: [TimedTextRun])],
+        options: Options = .default,
+        idGenerator: () -> UUID = UUID.init
+    ) -> MergeResult {
+        var pieces: [(order: Int, position: Int, piece: Piece)] = []
+        for (order, entry) in runsBySpeaker.enumerated() {
+            for (position, run) in entry.runs.enumerated()
+            where !run.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                pieces.append((
+                    order,
+                    position,
+                    Piece(start: run.start, end: run.end, text: run.text, speakerID: entry.speakerID)
+                ))
+            }
+        }
+        // Fully keyed so the order never depends on sort stability.
+        let ordered = pieces
+            .sorted { lhs, rhs in
+                (lhs.piece.start, lhs.order, lhs.position) < (rhs.piece.start, rhs.order, rhs.position)
+            }
+            .map(\.piece)
+
+        let utterances = coalesce(ordered, options: options, idGenerator: idGenerator)
         return MergeResult(segments: utterances, speakers: numberSpeakers(in: utterances))
     }
 
@@ -262,13 +307,19 @@ public enum TranscriptMerger {
 
     // MARK: - Coalescing
 
-    private static func coalesce(_ pieces: [Piece], idGenerator: () -> UUID) -> [TranscriptSegment] {
+    private static func coalesce(
+        _ pieces: [Piece],
+        options: Options,
+        idGenerator: () -> UUID
+    ) -> [TranscriptSegment] {
         var segments: [TranscriptSegment] = []
         for piece in pieces {
             let text = piece.text.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !text.isEmpty else { continue }
 
-            if var last = segments.last, last.speakerID == piece.speakerID {
+            if var last = segments.last,
+               last.speakerID == piece.speakerID,
+               !endsUtterance(last, before: piece, options: options) {
                 last.text = join(last.text, text)
                 last.end = max(last.end, piece.end)
                 segments[segments.count - 1] = last
@@ -285,6 +336,20 @@ public enum TranscriptMerger {
             }
         }
         return segments
+    }
+
+    /// Whether `piece` should open a new utterance even though its speaker
+    /// matches: after a long pause, or once `last` is long and at a sentence end.
+    private static func endsUtterance(
+        _ last: TranscriptSegment,
+        before piece: Piece,
+        options: Options
+    ) -> Bool {
+        if piece.start - last.end >= options.utteranceBreakGap { return true }
+        guard last.duration >= options.maxUtteranceDuration,
+              let final = last.text.last
+        else { return false }
+        return ".?!".contains(final)
     }
 
     /// Joins two text fragments with a single space, unless the left side already

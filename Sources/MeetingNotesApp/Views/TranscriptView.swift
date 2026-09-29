@@ -13,11 +13,14 @@ struct TranscriptView: View {
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 14) {
-                    ForEach(meeting.transcript) { segment in
+                LazyVStack(alignment: .leading, spacing: 6) {
+                    ForEach(Array(meeting.transcript.enumerated()), id: \.element.id) { index, segment in
                         UtteranceRow(
                             segment: segment,
                             speaker: meeting.speaker(id: segment.speakerID),
+                            isTrailing: isTrailing(segment.speakerID),
+                            showsHeader: index == 0
+                                || meeting.transcript[index - 1].speakerID != segment.speakerID,
                             isCurrent: segment.id == player.currentSegmentID,
                             isSoloPlaying: segment.id == player.soloSegmentID
                                 && player.isPlaying,
@@ -76,11 +79,24 @@ struct TranscriptView: View {
             }
         }
     }
+
+    /// Speakers alternate sides in order of first appearance and keep their
+    /// side for the whole meeting; the unknown speaker stays on the left.
+    private func isTrailing(_ speakerID: String) -> Bool {
+        guard speakerID != Speaker.unknownID,
+              let position = meeting.speakers
+                  .filter({ !$0.isUnknown })
+                  .firstIndex(where: { $0.id == speakerID })
+        else { return false }
+        return position % 2 == 1
+    }
 }
 
 private struct UtteranceRow: View {
     let segment: TranscriptSegment
     let speaker: Speaker?
+    let isTrailing: Bool
+    let showsHeader: Bool
     let isCurrent: Bool
     let isSoloPlaying: Bool
     let onRename: (String) -> Void
@@ -96,68 +112,108 @@ private struct UtteranceRow: View {
     @FocusState private var editorFocused: Bool
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            HStack(spacing: 8) {
-                Button {
-                    draftName = speaker?.displayName ?? ""
-                    isRenaming = true
-                } label: {
-                    Text(speaker?.displayName ?? "Unknown speaker")
-                        .font(.caption.weight(.semibold))
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 3)
-                        .background(
-                            SpeakerPalette.color(for: speaker).opacity(0.18),
-                            in: Capsule()
-                        )
-                        .foregroundStyle(SpeakerPalette.color(for: speaker))
+        HStack(spacing: 0) {
+            if isTrailing { Spacer(minLength: 60) }
+            VStack(alignment: isTrailing ? .trailing : .leading, spacing: 4) {
+                if showsHeader {
+                    header
                 }
-                .buttonStyle(.plain)
-                .help("Rename this speaker")
-                .disabled(speaker == nil || speaker?.isUnknown == true)
-                .popover(isPresented: $isRenaming) {
-                    SpeakerRenamePopover(name: $draftName) {
-                        onRename(draftName)
-                        isRenaming = false
-                    }
+                HStack(alignment: .top, spacing: 6) {
+                    if isTrailing { controls }
+                    bubble
+                    if !isTrailing { controls }
                 }
+            }
+            if !isTrailing { Spacer(minLength: 60) }
+        }
+        .padding(.top, showsHeader ? 10 : 0)
+        .frame(maxWidth: .infinity)
+        .onHover { isHovering = $0 }
+        .contextMenu {
+            Button("Edit Text") { beginEditing() }
+            Button("Play This Section") { onPlaySection() }
+            Button("Play from Here") { onSeek() }
+        }
+    }
 
-                Button(action: onSeek) {
-                    HStack(spacing: 3) {
-                        Image(systemName: "play.fill")
-                            .font(.system(size: 8))
-                            .opacity(isHovering ? 1 : 0)
-                        Text(MarkdownExporter.timestamp(segment.start))
-                            .font(.caption.monospacedDigit())
-                    }
+    private var header: some View {
+        HStack(spacing: 8) {
+            if isTrailing { timestamp }
+            nameChip
+            if !isTrailing { timestamp }
+        }
+    }
+
+    private var nameChip: some View {
+        Button {
+            draftName = speaker?.displayName ?? ""
+            isRenaming = true
+        } label: {
+            Text(speaker?.displayName ?? "Unknown speaker")
+                .font(.caption.weight(.semibold))
+                .padding(.horizontal, 8)
+                .padding(.vertical, 3)
+                .background(
+                    SpeakerPalette.color(for: speaker).opacity(0.18),
+                    in: Capsule()
+                )
+                .foregroundStyle(SpeakerPalette.color(for: speaker))
+        }
+        .buttonStyle(.plain)
+        .help("Rename this speaker")
+        .disabled(speaker == nil || speaker?.isUnknown == true)
+        .popover(isPresented: $isRenaming) {
+            SpeakerRenamePopover(name: $draftName) {
+                onRename(draftName)
+                isRenaming = false
+            }
+        }
+    }
+
+    private var timestamp: some View {
+        Button(action: onSeek) {
+            HStack(spacing: 3) {
+                Image(systemName: "play.fill")
+                    .font(.system(size: 8))
+                    .opacity(isHovering ? 1 : 0)
+                Text(MarkdownExporter.timestamp(segment.start))
+                    .font(.caption.monospacedDigit())
+            }
+            .foregroundStyle(.secondary)
+        }
+        .buttonStyle(.plain)
+        .help("Play from here")
+    }
+
+    /// Play-section and edit buttons, shown beside the bubble on hover so they
+    /// stay reachable on rows without a header.
+    private var controls: some View {
+        VStack(spacing: 6) {
+            Button(action: onPlaySection) {
+                Image(systemName: isSoloPlaying ? "pause.circle.fill" : "play.circle")
                     .foregroundStyle(.secondary)
-                }
-                .buttonStyle(.plain)
-                .help("Play from here")
+            }
+            .buttonStyle(.plain)
+            .opacity(isHovering || isSoloPlaying ? 1 : 0)
+            .help("Play this section")
 
-                Spacer(minLength: 0)
-
-                Button(action: onPlaySection) {
-                    Image(systemName: isSoloPlaying ? "pause.circle.fill" : "play.circle")
+            if !isEditing {
+                Button {
+                    beginEditing()
+                } label: {
+                    Image(systemName: "pencil")
                         .foregroundStyle(.secondary)
                 }
                 .buttonStyle(.plain)
-                .opacity(isHovering || isSoloPlaying ? 1 : 0)
-                .help("Play this section")
-
-                if !isEditing {
-                    Button {
-                        beginEditing()
-                    } label: {
-                        Image(systemName: "pencil")
-                            .foregroundStyle(.secondary)
-                    }
-                    .buttonStyle(.plain)
-                    .opacity(isHovering ? 1 : 0)
-                    .help("Edit this text")
-                }
+                .opacity(isHovering ? 1 : 0)
+                .help("Edit this text")
             }
+        }
+        .padding(.top, 8)
+    }
 
+    private var bubble: some View {
+        Group {
             if isEditing {
                 TextField("", text: $draftText, axis: .vertical)
                     .textFieldStyle(.plain)
@@ -169,18 +225,17 @@ private struct UtteranceRow: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
-        .padding(8)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
         .background(
-            isCurrent ? Color.accentColor.opacity(0.10) : Color.clear,
-            in: RoundedRectangle(cornerRadius: 8)
+            SpeakerPalette.color(for: speaker).opacity(isCurrent ? 0.24 : 0.10),
+            in: RoundedRectangle(cornerRadius: 12)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .strokeBorder(Color.accentColor.opacity(isCurrent ? 0.6 : 0), lineWidth: 1.5)
         )
         .animation(.easeInOut(duration: 0.2), value: isCurrent)
-        .onHover { isHovering = $0 }
-        .contextMenu {
-            Button("Edit Text") { beginEditing() }
-            Button("Play This Section") { onPlaySection() }
-            Button("Play from Here") { onSeek() }
-        }
     }
 
     private func beginEditing() {

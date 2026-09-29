@@ -10,15 +10,28 @@ final class StubTranscriptionService: TranscriptionService, @unchecked Sendable 
         var prepareCount = 0
         var transcribeCount = 0
         var lastLocale: String?
+        /// File names handed to `transcribe`, in order — one per speaker track.
+        var audioFileNames: [String] = []
     }
 
     private let runs: [TimedTextRun]
+    private let runsByFileName: [String: [TimedTextRun]]
     private let error: (any Error)?
     let calls = Mutex(Calls())
 
+    /// Returns `runs` for every track, whichever speaker it belongs to.
     init(runs: [TimedTextRun] = [], error: (any Error)? = nil) {
         self.runs = runs
+        self.runsByFileName = [:]
         self.error = error
+    }
+
+    /// Returns the runs keyed by the track's file name (`"S1.wav"`), so each
+    /// speaker can hear something different; unknown names get `fallback`.
+    init(runsByFileName: [String: [TimedTextRun]], fallback: [TimedTextRun] = []) {
+        self.runs = fallback
+        self.runsByFileName = runsByFileName
+        self.error = nil
     }
 
     func supportedLocales() async -> [Locale] { [Locale(identifier: "en-US")] }
@@ -40,11 +53,12 @@ final class StubTranscriptionService: TranscriptionService, @unchecked Sendable 
         calls.withLock {
             $0.transcribeCount += 1
             $0.lastLocale = locale.identifier(.bcp47)
+            $0.audioFileNames.append(audioURL.lastPathComponent)
         }
         if let error { throw error }
         onProgress(0.5)
         onProgress(1)
-        return runs
+        return runsByFileName[audioURL.lastPathComponent] ?? runs
     }
 }
 

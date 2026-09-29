@@ -14,30 +14,6 @@ import Foundation
 /// through `PreparationGate`.
 public final class FluidAudioDiarizationService: DiarizationService, @unchecked Sendable {
 
-    /// Runs model preparation exactly once, and lets a later call retry if it failed.
-    private actor PreparationGate {
-        private var task: Task<Void, Error>?
-
-        func run(_ operation: @Sendable @escaping () async throws -> Void) async throws {
-            if let existing = task {
-                do {
-                    return try await existing.value
-                } catch {
-                    // A previous attempt failed (usually offline); allow a retry.
-                    task = nil
-                }
-            }
-            let newTask = Task(operation: operation)
-            task = newTask
-            do {
-                try await newTask.value
-            } catch {
-                task = nil
-                throw error
-            }
-        }
-    }
-
     private let manager: OfflineDiarizerManager
     private let gate = PreparationGate()
 
@@ -45,6 +21,33 @@ public final class FluidAudioDiarizationService: DiarizationService, @unchecked 
 
     public init(config: OfflineDiarizerConfig = .default) {
         self.manager = OfflineDiarizerManager(config: config)
+    }
+
+    /// The default configuration with selected clustering knobs overridden.
+    ///
+    /// - `clusteringThreshold`: the agglomerative cut; lower values separate
+    ///   similar-sounding voices more readily.
+    /// - `numSpeakers` / `minSpeakers` / `maxSpeakers`: bounds on the speaker
+    ///   count; when the estimate falls outside them the embeddings are
+    ///   re-clustered to the nearest bound.
+    /// - `Fa` / `Fb`: VBx warm-start weights (acoustic vs. prior). A higher
+    ///   `Fa` trusts the embeddings more and keeps small clusters alive.
+    public convenience init(
+        clusteringThreshold: Double? = nil,
+        numSpeakers: Int? = nil,
+        minSpeakers: Int? = nil,
+        maxSpeakers: Int? = nil,
+        Fa: Double? = nil,
+        Fb: Double? = nil
+    ) {
+        var config = OfflineDiarizerConfig.default
+        if let clusteringThreshold { config.clustering.threshold = clusteringThreshold }
+        if let numSpeakers { config.clustering.numSpeakers = numSpeakers }
+        if let minSpeakers { config.clustering.minSpeakers = minSpeakers }
+        if let maxSpeakers { config.clustering.maxSpeakers = maxSpeakers }
+        if let Fa { config.clustering.warmStartFa = Fa }
+        if let Fb { config.clustering.warmStartFb = Fb }
+        self.init(config: config)
     }
 
     public func prepare(onDownloadProgress: @Sendable @escaping (Double) -> Void) async throws {

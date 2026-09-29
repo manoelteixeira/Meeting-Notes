@@ -1,6 +1,11 @@
 import Foundation
 
-/// Runs a meeting through decode → transcribe → diarize → merge → notes.
+/// Runs a meeting through decode → diarize → transcribe per speaker → notes.
+///
+/// Speakers are identified first, then each speaker's own audio (everyone
+/// else muted, timeline intact) is transcribed on its own, so every word
+/// arrives already attributed. That keeps short interjections from being
+/// swallowed by whoever is talking around them.
 ///
 /// The meeting document is written after every completed stage, so cancelling or
 /// crashing mid-run never costs finished work and a retry resumes from the last
@@ -47,7 +52,7 @@ public struct ProcessingPipeline: Sendable {
     public init(
         store: MeetingStore,
         transcription: any TranscriptionService = AppleSpeechTranscriptionService(),
-        diarization: any DiarizationService = FluidAudioDiarizationService(),
+        diarization: any DiarizationService = DiarizationEngine.default.makeService(withVoiceprints: false),
         directory: SpeakerDirectory? = nil,
         notes: any NotesService = MLXNotesService(),
         notesTemplate: NotesTemplate = .default
@@ -119,8 +124,8 @@ public struct ProcessingPipeline: Sendable {
         let audioURL = store.audioURL(for: meeting)
         let locale = Locale(identifier: meeting.localeIdentifier)
 
-        // 1. Decode to 16 kHz mono for the diarizer. SpeechAnalyzer reads the
-        //    original file itself, since it prefers its own best audio format.
+        // 1. Decode to 16 kHz mono once; the diarizer reads it directly and
+        //    the per-speaker tracks are cut from it.
         onProgress(PipelineProgress(stage: .decoded, kind: .indeterminate))
         let decoded = try await AudioDecoder.decodeMono16k(url: audioURL)
         if decoded.duration > 0, abs(decoded.duration - meeting.duration) > 0.5 {
@@ -152,28 +157,88 @@ public struct ProcessingPipeline: Sendable {
             )
         }
 
-        // 3. Transcription and diarization are independent reads of the same
-        //    audio, so run them concurrently.
+        // 3. Who spoke when. A recording the diarizer hears nothing in is
+        //    still transcribed once, as a single speaker.
         try Task.checkCancellation()
-        let duration = meeting.duration
-        async let runsTask: [TimedTextRun] = transcription.transcribe(
-            audioURL: audioURL,
-            locale: locale,
-            duration: duration
-        ) { fraction in
-            onProgress(PipelineProgress(stage: .transcribed, kind: .running(fraction)))
-        }
-        async let diarizationTask: DiarizationOutput = diarization.diarize(
-            samples: decoded.samples
-        ) { fraction in
+        onProgress(PipelineProgress(stage: .diarized, kind: .running(0)))
+        let diarized = try await diarization.diarize(samples: decoded.samples) { fraction in
             onProgress(PipelineProgress(stage: .diarized, kind: .running(fraction)))
         }
-
-        let (runs, diarized) = try await (runsTask, diarizationTask)
-        onProgress(PipelineProgress(stage: .transcribed, kind: .finished))
         onProgress(PipelineProgress(stage: .diarized, kind: .finished))
+        let duration = meeting.duration
+        let segments = diarized.segments.isEmpty
+            ? [DiarizedSegment(speakerID: "S1", start: 0, end: decoded.duration)]
+            : diarized.segments
 
-        guard !runs.isEmpty else {
+        // 4. One masked track per speaker, transcribed on its own. Words the
+        //    recognizer finds in the silence between spans are hallucinations,
+        //    and a word caught in the padding that belongs to someone else's
+        //    turn is theirs; both are dropped here. Audio no speaker covers
+        //    gets a pass of its own only if there is audibly something in it.
+        let tracksDirectory = FileManager.default.temporaryDirectory
+            .appending(path: "meeting-notes-tracks-\(UUID().uuidString)", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: tracksDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tracksDirectory) }
+
+        let speakerIDs = SpeakerTrackBuilder.speakerOrder(segments)
+        let leftover = SpeakerTrackBuilder.leftoverTrack(
+            segments: segments,
+            samples: decoded.samples,
+            sampleRate: decoded.sampleRate
+        )
+        let passes = speakerIDs.count + (leftover == nil ? 0 : 1)
+
+        var runsBySpeaker: [(speakerID: String, runs: [TimedTextRun])] = []
+        for (index, speakerID) in speakerIDs.enumerated() {
+            let track = SpeakerTrackBuilder.track(
+                for: speakerID,
+                segments: segments,
+                samples: decoded.samples,
+                sampleRate: decoded.sampleRate
+            )
+            let runs = try await transcribe(
+                track: track,
+                in: tracksDirectory,
+                sampleRate: decoded.sampleRate,
+                locale: locale,
+                duration: duration,
+                pass: (index, passes),
+                detail: "Transcribing Speaker \(index + 1) of \(speakerIDs.count)",
+                onProgress: onProgress
+            )
+            let kept = runs.filter {
+                SpeakerTrackBuilder.owns($0, speakerID: speakerID, spans: track.spans, segments: segments)
+            }
+            runsBySpeaker.append((speakerID, kept))
+        }
+        if let leftover {
+            let runs = try await transcribe(
+                track: leftover,
+                in: tracksDirectory,
+                sampleRate: decoded.sampleRate,
+                locale: locale,
+                duration: duration,
+                pass: (speakerIDs.count, passes),
+                detail: "Transcribing untagged speech",
+                onProgress: onProgress
+            )
+            // Nothing overlaps these by construction: the nearest-speaker
+            // rule and "Unknown speaker" fallback of the overlap merge apply.
+            let attributed = TranscriptMerger.merge(
+                runs: runs.filter { SpeakerTrackBuilder.overlaps($0, leftover.spans) },
+                diarization: segments
+            )
+            for utterance in attributed.segments {
+                runsBySpeaker.append((
+                    utterance.speakerID,
+                    [TimedTextRun(start: utterance.start, end: utterance.end, text: utterance.text)]
+                ))
+            }
+        }
+        onProgress(PipelineProgress(stage: .transcribed, kind: .finished))
+        runsBySpeaker = SpeakerTrackBuilder.droppingBleed(runsBySpeaker, segments: segments)
+
+        guard runsBySpeaker.contains(where: { !$0.runs.isEmpty }) else {
             throw PipelineError(
                 code: .transcriptionFailed,
                 message: "No speech was recognized in this recording.",
@@ -181,10 +246,10 @@ public struct ProcessingPipeline: Sendable {
             )
         }
 
-        // 4. Attribute text to speakers.
+        // 5. Interleave the speakers' words by time.
         try Task.checkCancellation()
         onProgress(PipelineProgress(stage: .merged, kind: .indeterminate))
-        let merged = TranscriptMerger.merge(runs: runs, diarization: diarized.segments)
+        let merged = TranscriptMerger.assemble(runsBySpeaker: runsBySpeaker)
         meeting.transcript = merged.segments
         meeting.speakers = Self.preservingRenames(merged.speakers, from: meeting.speakers)
         if let directory {
@@ -199,6 +264,43 @@ public struct ProcessingPipeline: Sendable {
         try await store.save(meeting)
 
         return meeting
+    }
+
+    /// Writes one track, transcribes it, and removes the file again so no
+    /// more than one track is ever on disk. Progress spans `pass` of the
+    /// total passes.
+    private func transcribe(
+        track: SpeakerTrackBuilder.Track,
+        in directory: URL,
+        sampleRate: Double,
+        locale: Locale,
+        duration: TimeInterval,
+        pass: (index: Int, count: Int),
+        detail: String,
+        onProgress: @escaping ProgressHandler
+    ) async throws -> [TimedTextRun] {
+        try Task.checkCancellation()
+        let count = Double(pass.count)
+        let index = Double(pass.index)
+        onProgress(PipelineProgress(stage: .transcribed, kind: .running(index / count), detail: detail))
+
+        let url = directory.appending(path: "\(track.speakerID).wav", directoryHint: .notDirectory)
+        try AudioFileWriter.writeMonoWAV(samples: track.samples, sampleRate: sampleRate, to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        return try await transcription.transcribe(
+            audioURL: url,
+            locale: locale,
+            duration: duration
+        ) { fraction in
+            onProgress(
+                PipelineProgress(
+                    stage: .transcribed,
+                    kind: .running((index + fraction) / count),
+                    detail: detail
+                )
+            )
+        }
     }
 
     /// Keeps user-chosen speaker names across a reprocess, matching on speaker id.

@@ -89,6 +89,21 @@ final class AppModel {
             UserDefaults.standard.set(
                 voiceRecognitionEnabled, forKey: Self.voiceRecognitionDefaultsKey
             )
+            // With Sortformer, recognition adds the pyannote models.
+            if diarizationEngine == .sortformer { diarizationModelsReady = false }
+            rebuildPipeline()
+        }
+    }
+
+    /// Which speaker-identification model new meetings run. Runs already in
+    /// flight keep the pipeline they started with.
+    var diarizationEngine: DiarizationEngine {
+        didSet {
+            guard diarizationEngine != oldValue else { return }
+            UserDefaults.standard.set(
+                diarizationEngine.rawValue, forKey: Self.diarizationEngineDefaultsKey
+            )
+            diarizationModelsReady = false
             rebuildPipeline()
         }
     }
@@ -129,6 +144,7 @@ final class AppModel {
     private static let notesTemplateDefaultsKey = "notesTemplate"
     private static let voiceRecognitionDefaultsKey = "voiceRecognitionEnabled"
     private static let systemAudioDefaultsKey = "recordSystemAudio"
+    private static let diarizationEngineDefaultsKey = "diarizationEngine"
 
     init(store: MeetingStore, directory: SpeakerDirectory) {
         let notesModelID = UserDefaults.standard.string(forKey: Self.notesModelDefaultsKey)
@@ -140,16 +156,21 @@ final class AppModel {
         let recognitionEnabled = UserDefaults.standard
             .object(forKey: Self.voiceRecognitionDefaultsKey) as? Bool ?? true
 
+        let engine = UserDefaults.standard.string(forKey: Self.diarizationEngineDefaultsKey)
+            .flatMap(DiarizationEngine.init(rawValue:)) ?? .default
+
         let service = MLXNotesService(model: notesModel)
         self.store = store
         self.directory = directory
         self.notesService = service
         self.notesTemplate = template
         self.voiceRecognitionEnabled = recognitionEnabled
+        self.diarizationEngine = engine
         self.includeSystemAudio = UserDefaults.standard
             .object(forKey: Self.systemAudioDefaultsKey) as? Bool ?? true
         self.pipeline = ProcessingPipeline(
             store: store,
+            diarization: engine.makeService(withVoiceprints: recognitionEnabled),
             directory: recognitionEnabled ? directory : nil,
             notes: service,
             notesTemplate: template
@@ -217,7 +238,9 @@ final class AppModel {
         defer { isPreparingModels = false }
         do {
             try await SpeechModelManager.ensureModel(for: locale) { _ in }
-            try await FluidAudioDiarizationService().prepare { _ in }
+            try await diarizationEngine
+                .makeService(withVoiceprints: voiceRecognitionEnabled)
+                .prepare { _ in }
             diarizationModelsReady = true
         } catch {
             alert = AppAlert(
@@ -633,6 +656,7 @@ final class AppModel {
     private func rebuildPipeline() {
         pipeline = ProcessingPipeline(
             store: store,
+            diarization: diarizationEngine.makeService(withVoiceprints: voiceRecognitionEnabled),
             directory: voiceRecognitionEnabled ? directory : nil,
             notes: notesService,
             notesTemplate: notesTemplate

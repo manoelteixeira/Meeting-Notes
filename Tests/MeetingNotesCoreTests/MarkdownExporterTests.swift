@@ -55,6 +55,21 @@ struct MarkdownExporterTests {
         #expect(!markdown.hasSuffix("\n\n"))
     }
 
+    @Test("Consecutive segments from one speaker name them once")
+    func splitTurnNamesSpeakerOnce() {
+        var meeting = sampleMeeting()
+        meeting.transcript.insert(
+            TranscriptSegment(start: 6, end: 8, text: "First item.", speakerID: "A"),
+            at: 1
+        )
+
+        let markdown = MarkdownExporter.export(meeting)
+
+        #expect(markdown.contains("**[00:00] Priya:** Let's start."))
+        #expect(markdown.contains("**[00:06]** First item."))
+        #expect(markdown.contains("**[01:05] Speaker 2:** Sounds good."))
+    }
+
     @Test("The transcript appendix can be omitted")
     func notesOnlyExport() {
         let markdown = MarkdownExporter.export(
