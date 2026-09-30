@@ -26,6 +26,30 @@ struct AudioFileWriterTests {
         #expect(worst < 1e-3)
     }
 
+    @Test("A track streamed to disk matches the same track written whole")
+    func streamedTrack() async throws {
+        let root = try AudioFixtures.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let rate = 16_000.0
+        let audio = DecodedAudio(
+            samples: (0..<Int(rate * 2)).map { Float(sin(Double($0) / 7)) * 0.5 },
+            sampleRate: rate
+        )
+        let track = SpeakerTrackBuilder.Track(speakerID: "A", spans: [0.3...0.9, 1.4...2.5])
+
+        let streamed = root.appending(path: "streamed.wav", directoryHint: .notDirectory)
+        try AudioFileWriter.writeMonoWAV(track, from: audio, to: streamed)
+        let whole = root.appending(path: "whole.wav", directoryHint: .notDirectory)
+        try AudioFileWriter.writeMonoWAV(
+            samples: SpeakerTrackBuilder.maskedSamples(track, from: audio.samples, sampleRate: rate),
+            sampleRate: rate,
+            to: whole
+        )
+
+        #expect(try Data(contentsOf: streamed) == Data(contentsOf: whole))
+    }
+
     @Test("Silence and a very short buffer both write cleanly")
     func edges() async throws {
         let root = try AudioFixtures.makeTemporaryDirectory()

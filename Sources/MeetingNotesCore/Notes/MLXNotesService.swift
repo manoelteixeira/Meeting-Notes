@@ -1,5 +1,6 @@
 import Foundation
 import HuggingFace
+import MLX
 import MLXHuggingFace
 import MLXLLM
 import MLXLMCommon
@@ -10,6 +11,10 @@ import Tokenizers
 /// Weights are fetched from Hugging Face once and cached on disk afterwards, so
 /// nothing but that initial download ever touches the network — the transcript
 /// itself never leaves the machine.
+///
+/// The model is loaded for a run and released as soon as the last run in
+/// flight finishes, so an idle app does not sit on several gigabytes of
+/// weights; the next run reloads them from disk in a few seconds.
 ///
 /// An `actor` rather than a struct: it owns a loaded `ModelContainer` worth
 /// several gigabytes, and both the load and the release need serializing.
@@ -25,6 +30,14 @@ public actor MLXNotesService: NotesService {
     /// In flight load, so concurrent callers share one download rather than
     /// racing two.
     private var loadTask: Task<ModelContainer, Error>?
+    /// Generations in flight. The model is released when this drops to zero,
+    /// so overlapping runs share one load.
+    private var activeGenerations = 0
+
+    /// Upper bound on the freed GPU buffers MLX keeps for reuse. Unbounded,
+    /// it holds on to gigabytes of intermediates after generation ends; a
+    /// small pool costs generation speed nothing measurable.
+    private static let bufferCacheLimit = 64 * 1024 * 1024
 
     public init(
         model: NotesModel = NotesModelCatalog.default,
@@ -34,6 +47,7 @@ public actor MLXNotesService: NotesService {
         self.model = model
         self.maxTokens = maxTokens
         self.temperature = temperature
+        Memory.cacheLimit = Self.bufferCacheLimit
     }
 
     public var isReady: Bool {
@@ -42,8 +56,11 @@ public actor MLXNotesService: NotesService {
 
     // MARK: - Loading
 
+    /// Downloads the model if needed. Loading is how the download happens,
+    /// but nothing is kept resident afterwards unless a run is using it.
     public func prepare(onDownloadProgress: @Sendable @escaping (Double) -> Void) async throws {
         _ = try await loadContainer(onDownloadProgress: onDownloadProgress)
+        releaseIfIdle()
     }
 
     private func loadContainer(
@@ -97,6 +114,15 @@ public actor MLXNotesService: NotesService {
         loadTask?.cancel()
         loadTask = nil
         container = nil
+        Memory.clearCache()
+    }
+
+    /// Drops the model once no run needs it. A load another caller is still
+    /// awaiting is left alone.
+    private func releaseIfIdle() {
+        guard activeGenerations == 0, container != nil else { return }
+        container = nil
+        Memory.clearCache()
     }
 
     // MARK: - Generation
@@ -106,6 +132,11 @@ public actor MLXNotesService: NotesService {
         user: String,
         onDelta: (@Sendable (String) -> Void)?
     ) async throws -> NotesCompletion {
+        activeGenerations += 1
+        defer {
+            activeGenerations -= 1
+            releaseIfIdle()
+        }
         let container = try await loadContainer(onDownloadProgress: { _ in })
         try Task.checkCancellation()
 

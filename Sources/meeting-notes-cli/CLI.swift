@@ -204,12 +204,7 @@ struct CLI {
             : found
 
         var tracks = SpeakerTrackBuilder.speakerOrder(segments).map { speakerID in
-            SpeakerTrackBuilder.track(
-                for: speakerID,
-                segments: segments,
-                samples: decoded.samples,
-                sampleRate: decoded.sampleRate
-            )
+            SpeakerTrackBuilder.track(for: speakerID, segments: segments)
         }
         if let leftover = SpeakerTrackBuilder.leftoverTrack(
             segments: segments, samples: decoded.samples, sampleRate: decoded.sampleRate
@@ -220,7 +215,7 @@ struct CLI {
         print("")
         for track in tracks {
             let url = directory.appending(path: "\(track.speakerID).wav", directoryHint: .notDirectory)
-            try AudioFileWriter.writeMonoWAV(samples: track.samples, sampleRate: decoded.sampleRate, to: url)
+            try AudioFileWriter.writeMonoWAV(track, from: decoded, to: url)
             let spans = track.spans
                 .map { "\(MarkdownExporter.timestamp($0.lowerBound))–\(MarkdownExporter.timestamp($0.upperBound))" }
                 .joined(separator: ", ")

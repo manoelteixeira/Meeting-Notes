@@ -49,20 +49,21 @@ struct SpeakerTrackBuilderTests {
     func masking() {
         let options = SpeakerTrackBuilder.Options(padding: 0.25, fadeDuration: 0.01)
         let track = SpeakerTrackBuilder.track(
-            for: "B", segments: segments, samples: samples, sampleRate: rate, options: options
+            for: "B", segments: segments, options: options
         )
+        let masked = SpeakerTrackBuilder.maskedSamples(track, from: samples, sampleRate: rate)
 
         #expect(track.speakerID == "B")
         #expect(track.spans == [1.25...2.75])
-        #expect(track.samples.count == samples.count)
+        #expect(masked.count == samples.count)
         // Well inside the span the audio is untouched...
-        #expect(track.samples[2_000] == samples[2_000])
-        #expect(track.samples[1_300] == samples[1_300])
+        #expect(masked[2_000] == samples[2_000])
+        #expect(masked[1_300] == samples[1_300])
         // ...and outside it is silent.
-        #expect(track.samples[0] == 0)
-        #expect(track.samples[1_000] == 0)
-        #expect(track.samples[3_000] == 0)
-        #expect(track.samples[3_999] == 0)
+        #expect(masked[0] == 0)
+        #expect(masked[1_000] == 0)
+        #expect(masked[3_000] == 0)
+        #expect(masked[3_999] == 0)
     }
 
     @Test("Edges fade in and out inside the span")
@@ -70,19 +71,20 @@ struct SpeakerTrackBuilderTests {
         let options = SpeakerTrackBuilder.Options(padding: 0, fadeDuration: 0.01)
         let single = [DiarizedSegment(speakerID: "A", start: 1.0, end: 2.0)]
         let track = SpeakerTrackBuilder.track(
-            for: "A", segments: single, samples: samples, sampleRate: rate, options: options
+            for: "A", segments: single, options: options
         )
+        let masked = SpeakerTrackBuilder.maskedSamples(track, from: samples, sampleRate: rate)
 
         // Ten samples of ramp at each edge, strictly rising then strictly falling.
-        let head = Array(track.samples[1_000..<1_010])
+        let head = Array(masked[1_000..<1_010])
         #expect(head.first! < samples[1_000])
         #expect(zip(head, head.dropFirst()).allSatisfy { $0 < $1 })
-        #expect(track.samples[1_010] == samples[1_010])
+        #expect(masked[1_010] == samples[1_010])
 
-        let tail = Array(track.samples[1_990..<2_000])
+        let tail = Array(masked[1_990..<2_000])
         #expect(zip(tail, tail.dropFirst()).allSatisfy { $0 > $1 })
-        #expect(track.samples[1_989] == samples[1_989])
-        #expect(track.samples[2_000] == 0)
+        #expect(masked[1_989] == samples[1_989])
+        #expect(masked[2_000] == 0)
     }
 
     @Test("A span at the very start of the file is not faded in")
@@ -90,10 +92,11 @@ struct SpeakerTrackBuilderTests {
         let options = SpeakerTrackBuilder.Options(padding: 0, fadeDuration: 0.01)
         let opening = [DiarizedSegment(speakerID: "A", start: 0, end: 1.0)]
         let track = SpeakerTrackBuilder.track(
-            for: "A", segments: opening, samples: samples, sampleRate: rate, options: options
+            for: "A", segments: opening, options: options
         )
-        #expect(track.samples[0] == samples[0])
-        #expect(track.samples[5] == samples[5])
+        let masked = SpeakerTrackBuilder.maskedSamples(track, from: samples, sampleRate: rate)
+        #expect(masked[0] == samples[0])
+        #expect(masked[5] == samples[5])
     }
 
     @Test("Overlapping speech lands in both speakers' tracks")
@@ -104,27 +107,56 @@ struct SpeakerTrackBuilderTests {
         ]
         let options = SpeakerTrackBuilder.Options(padding: 0, fadeDuration: 0)
         let a = SpeakerTrackBuilder.track(
-            for: "A", segments: overlapping, samples: samples, sampleRate: rate, options: options
+            for: "A", segments: overlapping, options: options
         )
         let b = SpeakerTrackBuilder.track(
-            for: "B", segments: overlapping, samples: samples, sampleRate: rate, options: options
+            for: "B", segments: overlapping, options: options
         )
-        #expect(a.samples[1_500] == samples[1_500])
-        #expect(b.samples[1_500] == samples[1_500])
-        #expect(a.samples[2_500] == 0)
-        #expect(b.samples[500] == 0)
+        let maskedA = SpeakerTrackBuilder.maskedSamples(a, from: samples, sampleRate: rate)
+        let maskedB = SpeakerTrackBuilder.maskedSamples(b, from: samples, sampleRate: rate)
+        #expect(maskedA[1_500] == samples[1_500])
+        #expect(maskedB[1_500] == samples[1_500])
+        #expect(maskedA[2_500] == 0)
+        #expect(maskedB[500] == 0)
     }
 
     @Test("Spans past the end of the audio are clipped, not fatal")
     func spanBeyondAudio() {
         let long = [DiarizedSegment(speakerID: "A", start: 3.5, end: 10)]
         let track = SpeakerTrackBuilder.track(
-            for: "A", segments: long, samples: samples, sampleRate: rate,
-            options: .init(padding: 0, fadeDuration: 0)
+            for: "A", segments: long, options: .init(padding: 0, fadeDuration: 0)
         )
-        #expect(track.samples.count == samples.count)
-        #expect(track.samples[3_999] == samples[3_999])
-        #expect(track.samples[3_499] == 0)
+        let masked = SpeakerTrackBuilder.maskedSamples(track, from: samples, sampleRate: rate)
+        #expect(masked.count == samples.count)
+        #expect(masked[3_999] == samples[3_999])
+        #expect(masked[3_499] == 0)
+    }
+
+    @Test("Filling a track in chunks matches filling it whole")
+    func chunkedFillMatchesWhole() {
+        // Faded edges, a span at the file start and one past the end, so
+        // chunk boundaries land inside ramps and at both file edges.
+        let track = SpeakerTrackBuilder.Track(
+            speakerID: "A",
+            spans: [0...0.4, 1.003...1.5, 2.0...2.02, 3.9...5],
+            fadeDuration: 0.01
+        )
+        let whole = SpeakerTrackBuilder.maskedSamples(track, from: samples, sampleRate: rate)
+        for chunk in [3, 7, 10, 333, 4_000] {
+            var stitched: [Float] = []
+            var start = 0
+            while start < samples.count {
+                let frames = start..<min(start + chunk, samples.count)
+                stitched += [Float](unsafeUninitializedCapacity: frames.count) { buffer, count in
+                    SpeakerTrackBuilder.fillMasked(
+                        buffer, frames: frames, of: track, from: samples, sampleRate: rate
+                    )
+                    count = frames.count
+                }
+                start = frames.upperBound
+            }
+            #expect(stitched == whole, "chunk size \(chunk)")
+        }
     }
 
     @Test("A run counts as kept only where it overlaps a span")
@@ -235,9 +267,10 @@ struct SpeakerTrackBuilderTests {
         )
         #expect(leftover?.speakerID == Speaker.unknownID)
         #expect(leftover?.spans == [1.25...4.0])
-        #expect(leftover?.samples[500] == 0)
-        #expect(leftover?.samples[3_000] == 0.3)
-        #expect(leftover?.samples[2_000] == 0)
+        let masked = leftover.map { SpeakerTrackBuilder.maskedSamples($0, from: audio, sampleRate: rate) }
+        #expect(masked?[500] == 0)
+        #expect(masked?[3_000] == 0.3)
+        #expect(masked?[2_000] == 0)
 
         // Found both bursts: the gaps are silent, no leftover pass.
         let complete = [

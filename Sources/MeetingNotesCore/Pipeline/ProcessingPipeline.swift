@@ -190,16 +190,11 @@ public struct ProcessingPipeline: Sendable {
 
         var runsBySpeaker: [(speakerID: String, runs: [TimedTextRun])] = []
         for (index, speakerID) in speakerIDs.enumerated() {
-            let track = SpeakerTrackBuilder.track(
-                for: speakerID,
-                segments: segments,
-                samples: decoded.samples,
-                sampleRate: decoded.sampleRate
-            )
+            let track = SpeakerTrackBuilder.track(for: speakerID, segments: segments)
             let runs = try await transcribe(
                 track: track,
+                from: decoded,
                 in: tracksDirectory,
-                sampleRate: decoded.sampleRate,
                 locale: locale,
                 duration: duration,
                 pass: (index, passes),
@@ -214,8 +209,8 @@ public struct ProcessingPipeline: Sendable {
         if let leftover {
             let runs = try await transcribe(
                 track: leftover,
+                from: decoded,
                 in: tracksDirectory,
-                sampleRate: decoded.sampleRate,
                 locale: locale,
                 duration: duration,
                 pass: (speakerIDs.count, passes),
@@ -267,12 +262,12 @@ public struct ProcessingPipeline: Sendable {
     }
 
     /// Writes one track, transcribes it, and removes the file again so no
-    /// more than one track is ever on disk. Progress spans `pass` of the
-    /// total passes.
+    /// more than one track is ever on disk, and none is ever held in memory.
+    /// Progress spans `pass` of the total passes.
     private func transcribe(
         track: SpeakerTrackBuilder.Track,
+        from audio: DecodedAudio,
         in directory: URL,
-        sampleRate: Double,
         locale: Locale,
         duration: TimeInterval,
         pass: (index: Int, count: Int),
@@ -285,7 +280,7 @@ public struct ProcessingPipeline: Sendable {
         onProgress(PipelineProgress(stage: .transcribed, kind: .running(index / count), detail: detail))
 
         let url = directory.appending(path: "\(track.speakerID).wav", directoryHint: .notDirectory)
-        try AudioFileWriter.writeMonoWAV(samples: track.samples, sampleRate: sampleRate, to: url)
+        try AudioFileWriter.writeMonoWAV(track, from: audio, to: url)
         defer { try? FileManager.default.removeItem(at: url) }
 
         return try await transcription.transcribe(

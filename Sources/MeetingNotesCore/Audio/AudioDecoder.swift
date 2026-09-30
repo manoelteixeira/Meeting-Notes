@@ -87,19 +87,25 @@ public enum AudioDecoder {
         var samples: [Float] = []
         samples.reserveCapacity(Int(Double(file.length) * ratio) + Int(outputCapacity))
 
+        // One buffer each way, reused for every chunk: the converter consumes
+        // an input buffer before asking for the next, and the output is
+        // copied out before the next `convert`.
+        guard
+            let outputBuffer = AVAudioPCMBuffer(pcmFormat: outputFormat, frameCapacity: outputCapacity),
+            let inputBuffer = AVAudioPCMBuffer(pcmFormat: inputFormat, frameCapacity: inputChunk)
+        else {
+            throw PipelineError.unsupportedAudio("Could not allocate a conversion buffer.")
+        }
+
         // The converter's input block is typed @Sendable but AVAudioConverter
         // invokes it synchronously on this thread, so plain locals are safe here.
         nonisolated(unsafe) var readerFinished = false
         nonisolated(unsafe) var readError: Error?
+        nonisolated(unsafe) let input = inputBuffer
 
         while true {
             try Task.checkCancellation()
-            guard let outputBuffer = AVAudioPCMBuffer(
-                pcmFormat: outputFormat,
-                frameCapacity: outputCapacity
-            ) else {
-                throw PipelineError.unsupportedAudio("Could not allocate an output buffer.")
-            }
+            outputBuffer.frameLength = 0
 
             var conversionError: NSError?
             let status = converter.convert(to: outputBuffer, error: &conversionError) { _, inputStatus in
@@ -107,14 +113,7 @@ public enum AudioDecoder {
                     inputStatus.pointee = .endOfStream
                     return nil
                 }
-                guard let inputBuffer = AVAudioPCMBuffer(
-                    pcmFormat: inputFormat,
-                    frameCapacity: inputChunk
-                ) else {
-                    readerFinished = true
-                    inputStatus.pointee = .endOfStream
-                    return nil
-                }
+                let inputBuffer = input
                 do {
                     try file.read(into: inputBuffer, frameCount: inputChunk)
                 } catch {
@@ -187,7 +186,17 @@ public enum AudioDecoder {
             throw reader.error ?? PipelineError.unsupportedAudio("Reading the audio track failed.")
         }
 
+        // Reserved up front so an hour of audio is not grown by doubling,
+        // which would briefly need twice its size.
         var samples: [Float] = []
+        if let duration = try? await asset.load(.duration) {
+            let seconds = CMTimeGetSeconds(duration)
+            // Capped at a day, so a corrupt container's duration cannot ask
+            // for an absurd allocation; anything longer simply grows.
+            if seconds.isFinite, seconds > 0 {
+                samples.reserveCapacity(Int(min(seconds, 86_400) * targetSampleRate) + Int(targetSampleRate))
+            }
+        }
         while let sampleBuffer = output.copyNextSampleBuffer() {
             if Task.isCancelled {
                 reader.cancelReading()
@@ -197,20 +206,21 @@ public enum AudioDecoder {
             let length = CMBlockBufferGetDataLength(blockBuffer)
             guard length > 0 else { continue }
 
+            // Copied straight onto the end of `samples`, with no staging array.
             let count = length / MemoryLayout<Float>.size
-            var chunk = [Float](repeating: 0, count: count)
-            let status = chunk.withUnsafeMutableBytes { raw -> OSStatus in
+            let end = samples.count
+            samples.append(contentsOf: repeatElement(0, count: count))
+            let status = samples.withUnsafeMutableBufferPointer { buffer -> OSStatus in
                 CMBlockBufferCopyDataBytes(
                     blockBuffer,
                     atOffset: 0,
-                    dataLength: length,
-                    destination: raw.baseAddress!
+                    dataLength: count * MemoryLayout<Float>.size,
+                    destination: buffer.baseAddress! + end
                 )
             }
             guard status == kCMBlockBufferNoErr else {
                 throw PipelineError.unsupportedAudio("Copying decoded audio failed.")
             }
-            samples.append(contentsOf: chunk)
         }
 
         if reader.status == .failed {

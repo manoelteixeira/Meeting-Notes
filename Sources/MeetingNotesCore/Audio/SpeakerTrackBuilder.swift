@@ -25,17 +25,25 @@ public enum SpeakerTrackBuilder {
         public static let `default` = Options()
     }
 
-    /// A speaker's masked audio plus the spans that were kept.
+    /// A speaker's masked audio, described rather than materialized: the
+    /// spans that are kept and how their edges fade. `fillMasked` renders it
+    /// from the meeting's samples a chunk at a time, so an hour-long track
+    /// never needs a second full-length buffer.
     public struct Track: Sendable, Equatable {
         public var speakerID: String
         /// Padded, merged spans in seconds; audio outside them is silent.
         public var spans: [ClosedRange<TimeInterval>]
-        public var samples: [Float]
+        /// Length of the linear ramp inside each span edge.
+        public var fadeDuration: TimeInterval
 
-        public init(speakerID: String, spans: [ClosedRange<TimeInterval>], samples: [Float]) {
+        public init(
+            speakerID: String,
+            spans: [ClosedRange<TimeInterval>],
+            fadeDuration: TimeInterval = Options.default.fadeDuration
+        ) {
             self.speakerID = speakerID
             self.spans = spans
-            self.samples = samples
+            self.fadeDuration = fadeDuration
         }
     }
 
@@ -73,15 +81,12 @@ public enum SpeakerTrackBuilder {
     public static func track(
         for speakerID: String,
         segments: [DiarizedSegment],
-        samples: [Float],
-        sampleRate: Double,
         options: Options = .default
     ) -> Track {
-        let spans = paddedSpans(for: speakerID, in: segments, options: options)
-        return Track(
+        Track(
             speakerID: speakerID,
-            spans: spans,
-            samples: mask(samples, keeping: spans, sampleRate: sampleRate, fadeDuration: options.fadeDuration)
+            spans: paddedSpans(for: speakerID, in: segments, options: options),
+            fadeDuration: options.fadeDuration
         )
     }
 
@@ -119,11 +124,7 @@ public enum SpeakerTrackBuilder {
 
         guard audibleSeconds(in: gaps, comparedTo: covered, samples: samples, sampleRate: sampleRate) >= minimumSpeech
         else { return nil }
-        return Track(
-            speakerID: Speaker.unknownID,
-            spans: gaps,
-            samples: mask(samples, keeping: gaps, sampleRate: sampleRate, fadeDuration: options.fadeDuration)
-        )
+        return Track(speakerID: Speaker.unknownID, spans: gaps, fadeDuration: options.fadeDuration)
     }
 
     /// Whether a recognized run falls on audio that was kept: a positive
@@ -255,46 +256,71 @@ public enum SpeakerTrackBuilder {
         return merged
     }
 
-    /// Copies `spans` out of `samples` into silence, fading each edge that
-    /// does not touch the file's own edge.
-    private static func mask(
-        _ samples: [Float],
-        keeping spans: [ClosedRange<TimeInterval>],
-        sampleRate: Double,
-        fadeDuration: TimeInterval
+    /// The whole masked track as one array. Fine for short audio and tests;
+    /// the pipeline streams it through `fillMasked` instead.
+    public static func maskedSamples(
+        _ track: Track,
+        from samples: [Float],
+        sampleRate: Double
     ) -> [Float] {
-        var output = [Float](repeating: 0, count: samples.count)
-        guard sampleRate > 0, sampleRate.isFinite else { return output }
-        let fadeLength = max(0, Int((fadeDuration * sampleRate).rounded()))
+        [Float](unsafeUninitializedCapacity: samples.count) { buffer, count in
+            fillMasked(buffer, frames: 0..<samples.count, of: track, from: samples, sampleRate: sampleRate)
+            count = samples.count
+        }
+    }
+
+    /// Writes frames `frames` of `track` into `output`: `track`'s spans
+    /// copied out of `samples` over silence, each edge that does not touch
+    /// the file's own edge faded. Filling consecutive ranges yields exactly
+    /// the whole track, whatever the chunk boundaries.
+    public static func fillMasked(
+        _ output: UnsafeMutableBufferPointer<Float>,
+        frames: Range<Int>,
+        of track: Track,
+        from samples: [Float],
+        sampleRate: Double
+    ) {
+        precondition(output.count >= frames.count && frames.upperBound <= samples.count)
+        output.update(repeating: 0)
+        guard sampleRate > 0, sampleRate.isFinite else { return }
+        let fadeLength = max(0, Int((track.fadeDuration * sampleRate).rounded()))
         let count = Double(samples.count)
+        let base = frames.lowerBound
 
         func index(_ seconds: TimeInterval) -> Int {
             guard seconds.isFinite else { return seconds > 0 ? samples.count : 0 }
             return Int(min(max((seconds * sampleRate).rounded(), 0), count))
         }
 
-        for span in spans {
-            let start = index(span.lowerBound)
-            let end = max(start, index(span.upperBound))
-            guard end > start else { continue }
-            for position in start..<end { output[position] = samples[position] }
+        samples.withUnsafeBufferPointer { source in
+            for span in track.spans {
+                let start = index(span.lowerBound)
+                let end = max(start, index(span.upperBound))
+                let lower = max(start, frames.lowerBound)
+                let upper = min(end, frames.upperBound)
+                guard upper > lower else { continue }
+                (output.baseAddress! + (lower - base))
+                    .update(from: source.baseAddress! + lower, count: upper - lower)
 
-            // Ramps sit inside the span so they never reach beyond the pad;
-            // a span that touches the file edge is left square there.
-            let ramp = min(fadeLength, (end - start) / 2)
-            guard ramp > 0 else { continue }
-            if start > 0 {
-                for step in 0..<ramp {
-                    output[start + step] *= Float(step + 1) / Float(ramp + 1)
+                // Ramps sit inside the span so they never reach beyond the pad;
+                // a span that touches the file edge is left square there.
+                let ramp = min(fadeLength, (end - start) / 2)
+                guard ramp > 0 else { continue }
+                // Only the part of each ramp inside `frames` is touched here.
+                let headEnd = min(upper, start + ramp)
+                if start > 0, lower < headEnd {
+                    for position in lower..<headEnd {
+                        output[position - base] *= Float(position - start + 1) / Float(ramp + 1)
+                    }
                 }
-            }
-            if end < samples.count {
-                for step in 0..<ramp {
-                    output[end - 1 - step] *= Float(step + 1) / Float(ramp + 1)
+                let tailStart = max(lower, end - ramp)
+                if end < samples.count, tailStart < upper {
+                    for position in tailStart..<upper {
+                        output[position - base] *= Float(end - position) / Float(ramp + 1)
+                    }
                 }
             }
         }
-        return output
     }
 
     /// Seconds of `gaps` at least a quarter as loud as the typical found

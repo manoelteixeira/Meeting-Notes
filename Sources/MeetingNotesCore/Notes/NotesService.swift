@@ -23,7 +23,7 @@ public protocol NotesService: Sendable {
     /// pipeline so a run never kicks off a multi-gigabyte download on its own.
     var isReady: Bool { get async }
 
-    /// Downloads and loads the model if this is the first run.
+    /// Downloads the model if it is not on disk yet. It need not stay loaded.
     func prepare(onDownloadProgress: @Sendable @escaping (Double) -> Void) async throws
 
     /// - Parameter onDelta: called with incremental text as it is generated;
