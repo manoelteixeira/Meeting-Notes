@@ -16,8 +16,8 @@ struct NotesView: View {
                     }
                 }
                 .padding(24)
-                .frame(maxWidth: 760, alignment: .leading)
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .frame(maxWidth: .readableWidth, alignment: .leading)
+                .frame(maxWidth: .infinity)
             }
             .textSelection(.enabled)
             .safeAreaInset(edge: .bottom) {

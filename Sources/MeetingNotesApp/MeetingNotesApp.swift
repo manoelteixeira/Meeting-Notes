@@ -48,7 +48,7 @@ struct MeetingNotesApp: App {
     }
 }
 
-/// File › New Recording / Stop Recording.
+/// File › New Recording / Stop Recording, and Import Recording….
 private struct RecordingCommands: View {
     let model: AppModel?
 
@@ -57,10 +57,17 @@ private struct RecordingCommands: View {
             Button("Stop Recording") { Task { await model.stopRecording() } }
                 .keyboardShortcut("r", modifiers: [.command, .shift])
         } else {
-            Button("New Recording") { Task { await model?.startRecording() } }
-                .keyboardShortcut("r", modifiers: [.command, .shift])
-                .disabled(model == nil)
+            Button("New Recording") {
+                // Show the Record screen so its timer and meters are in view.
+                model?.path = [.record]
+                Task { await model?.startRecording() }
+            }
+            .keyboardShortcut("r", modifiers: [.command, .shift])
+            .disabled(model == nil)
         }
+        Button("Import Recording…") { model?.path = [.importRecording] }
+            .keyboardShortcut("o")
+            .disabled(model == nil)
     }
 }
 

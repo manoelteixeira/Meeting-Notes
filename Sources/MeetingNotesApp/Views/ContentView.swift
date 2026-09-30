@@ -1,52 +1,35 @@
 import MeetingNotesCore
 import SwiftUI
-import UniformTypeIdentifiers
+
+extension CGFloat {
+    /// Width of the centred column that meeting content reads in.
+    static let readableWidth: CGFloat = 860
+}
 
 struct ContentView: View {
     @Bindable var model: AppModel
-    @State private var isImporting = false
 
     var body: some View {
-        NavigationSplitView {
-            MeetingSidebar(model: model, isImporting: $isImporting)
-                .navigationSplitViewColumnWidth(min: 240, ideal: 280)
-        } detail: {
-            Group {
-                if let meeting = model.selectedMeeting {
-                    MeetingDetailView(model: model, meeting: meeting)
-                } else {
-                    EmptyLibraryView(isImporting: $isImporting) {
-                        Task { await model.startRecording() }
-                    }
+        NavigationStack(path: $model.path) {
+            HomeView(model: model)
+                .navigationDestination(for: Route.self, destination: destination)
+        }
+        .safeAreaInset(edge: .top, spacing: 0) {
+            // The Record screen shows the recording itself; everywhere else a
+            // bar keeps it visible and stoppable.
+            if model.recording.isRecording, model.path.last != .record {
+                RecordingBar(recording: model.recording) {
+                    Task { await model.stopRecording() }
+                } onDiscard: {
+                    model.discardRecording()
                 }
-            }
-            .safeAreaInset(edge: .top, spacing: 0) {
-                if model.recording.isRecording {
-                    RecordingBar(recording: model.recording) {
-                        Task { await model.stopRecording() }
-                    } onDiscard: {
-                        model.discardRecording()
-                    }
-                }
-            }
-            // Dropping onto the detail pane imports, whether or not a meeting is
-            // already selected — the empty state is where people reach for it.
-            .dropDestination(for: URL.self) { urls, _ in
-                Task { await model.importAudio(at: urls) }
-                return true
             }
         }
-        .fileImporter(
-            isPresented: $isImporting,
-            allowedContentTypes: AudioFileTypes.all,
-            allowsMultipleSelection: true
-        ) { result in
-            switch result {
-            case .success(let urls):
-                Task { await model.importAudio(at: urls) }
-            case .failure(let error):
-                model.alert = AppAlert(title: "Import failed", message: error.localizedDescription)
-            }
+        // Dropping audio anywhere in the window imports it, not just on the
+        // Import screen's drop zone.
+        .dropDestination(for: URL.self) { urls, _ in
+            Task { await model.importAudio(at: urls) }
+            return true
         }
         .alert(
             model.alert?.title ?? "",
@@ -61,23 +44,21 @@ struct ContentView: View {
             Text(alert.message)
         }
     }
-}
 
-/// Shown when nothing is selected — including the very first launch.
-struct EmptyLibraryView: View {
-    @Binding var isImporting: Bool
-    let onRecord: () -> Void
-
-    var body: some View {
-        ContentUnavailableView {
-            Label("No meeting selected", systemImage: "waveform")
-        } description: {
-            Text("Record a meeting or import a recording to transcribe it, identify who spoke, and write up the notes.")
-        } actions: {
-            HStack {
-                Button("Record Meeting", systemImage: "record.circle", action: onRecord)
-                    .buttonStyle(.borderedProminent)
-                Button("Import Recording…") { isImporting = true }
+    @ViewBuilder
+    private func destination(_ route: Route) -> some View {
+        switch route {
+        case .meetings:
+            MeetingsView(model: model)
+        case .record:
+            RecordView(model: model)
+        case .importRecording:
+            ImportView(model: model)
+        case .meeting(let id):
+            if let meeting = model.meeting(id: id) {
+                MeetingDetailView(model: model, meeting: meeting)
+            } else {
+                ContentUnavailableView("Meeting not found", systemImage: "questionmark.folder")
             }
         }
     }

@@ -80,8 +80,10 @@ struct AudioPlayerBar: View {
                 .help("Playback speed")
             }
         }
-        .padding(.horizontal, 16)
+        .padding(.horizontal, 24)
+        .frame(maxWidth: .readableWidth)
         .padding(.vertical, 10)
+        .frame(maxWidth: .infinity)
         .background(.bar)
     }
 }

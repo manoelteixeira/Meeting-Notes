@@ -30,6 +30,7 @@ struct MeetingDetailView: View {
                 NeedsModelBanner()
             }
 
+            header
             content
         }
         .task(id: meeting.id) {
@@ -46,9 +47,7 @@ struct MeetingDetailView: View {
         }
         .onDisappear { player.stop() }
         .navigationTitle(meeting.title)
-        .navigationSubtitle(
-            "\(MarkdownExporter.timestamp(meeting.duration)) · \(meeting.speakers.count) speakers"
-        )
+        .toolbar(removing: .title)
         .toolbar { toolbarContent }
     }
 
@@ -61,16 +60,14 @@ struct MeetingDetailView: View {
                 onCancel: { model.cancelProcessing(meeting.id) }
             )
         } else if meeting.hasTranscript {
-            TabView(selection: $selectedTab) {
-                TranscriptView(model: model, meeting: meeting, player: player)
-                    .tabItem { Text("Transcript") }
-                    .tag(Tab.transcript)
-
-                NotesView(model: model, meeting: meeting)
-                    .tabItem { Text("Notes") }
-                    .tag(Tab.notes)
+            Group {
+                switch selectedTab {
+                case .transcript:
+                    TranscriptView(model: model, meeting: meeting, player: player)
+                case .notes:
+                    NotesView(model: model, meeting: meeting)
+                }
             }
-            .padding(.top, 8)
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 AudioPlayerBar(player: player)
             }
@@ -86,8 +83,50 @@ struct MeetingDetailView: View {
         }
     }
 
+    /// Title, when, how long, and who was there — the speaker chips double as
+    /// a legend for the transcript's colours.
+    private var header: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(meeting.title)
+                .font(.title.bold())
+                .textSelection(.enabled)
+            HStack(spacing: 8) {
+                Text(meeting.createdAt, format: .dateTime.month().day().hour().minute())
+                Text("·")
+                Text(MarkdownExporter.timestamp(meeting.duration))
+                ForEach(meeting.speakers.filter { !$0.isUnknown }) { speaker in
+                    Text(speaker.displayName)
+                        .font(.caption.weight(.semibold))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 2)
+                        .background(SpeakerPalette.color(for: speaker).opacity(0.16), in: Capsule())
+                        .foregroundStyle(SpeakerPalette.color(for: speaker))
+                }
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 24)
+        .padding(.top, 24)
+        .padding(.bottom, 14)
+        .frame(maxWidth: .readableWidth, alignment: .leading)
+        .frame(maxWidth: .infinity)
+        .overlay(alignment: .bottom) { Divider() }
+    }
+
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
+        ToolbarItem(placement: .principal) {
+            if meeting.hasTranscript, !isProcessing {
+                Picker("View", selection: $selectedTab) {
+                    Text("Transcript").tag(Tab.transcript)
+                    Text("Notes").tag(Tab.notes)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .fixedSize()
+            }
+        }
         ToolbarItem {
             Button {
                 model.regenerateNotes(meeting.id)

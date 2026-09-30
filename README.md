@@ -14,13 +14,13 @@ offline, and neither the audio nor the transcript leaves the machine.
 
 - **Record a meeting in the app** — the microphone plus, optionally, what
   other apps are playing, so both sides of a Zoom, Meet or Teams call land in
-  one recording. Stop, and it processes like any import. The toolbar's record
-  button or File › New Recording (⇧⌘R) starts it; live meters show both
+  one recording. Stop, and it processes like any import. Home › Record Meeting
+  or File › New Recording (⇧⌘R) starts it; live meters show both
   sources. Quitting mid-recording saves it first, and a recording cut short by
   a crash is recovered at next launch. Settings › Recording turns system audio
   off for in-room meetings.
-- **Import a recording** by dragging it into the window or with the file
-  picker. Anything AVFoundation can decode works — m4a, mp3, wav, and the rest.
+- **Import a recording** by dragging it into the window, from
+  Home › Import Recording, or with File › Import Recording… (⌘O). Anything AVFoundation can decode works — m4a, mp3, wav, and the rest.
 - **On-device transcription** with Apple's `SpeechAnalyzer`, with word-level
   timestamps. The transcription language is selectable in Settings.
 - **Speaker identification first, then transcription per speaker.** FluidAudio's

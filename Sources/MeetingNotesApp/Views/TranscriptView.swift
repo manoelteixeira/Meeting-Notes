@@ -39,8 +39,10 @@ struct TranscriptView: View {
                         .id(segment.id)
                     }
                 }
-                .padding(20)
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.vertical, 20)
+                .padding(.horizontal, 24)
+                .frame(maxWidth: .readableWidth)
+                .frame(maxWidth: .infinity)
             }
             .textSelection(.enabled)
             .onScrollPhaseChange { _, newPhase in

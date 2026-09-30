@@ -22,6 +22,14 @@ struct AppAlert: Identifiable, Equatable {
     var message: String
 }
 
+/// A screen the window can navigate to from Home.
+enum Route: Hashable {
+    case meetings
+    case record
+    case importRecording
+    case meeting(Meeting.ID)
+}
+
 /// Single source of truth for the UI.
 ///
 /// Everything the views read lives here on the main actor; the store and the
@@ -33,7 +41,8 @@ final class AppModel {
     // MARK: - Published state
 
     private(set) var meetings: [Meeting] = []
-    var selectedMeetingID: Meeting.ID?
+    /// The navigation stack above Home; empty means Home is showing.
+    var path: [Route] = []
     private(set) var progress: [UUID: MeetingProgress] = [:]
     var alert: AppAlert?
 
@@ -186,9 +195,14 @@ final class AppModel {
         AppModel(store: try MeetingStore(), directory: try SpeakerDirectory())
     }
 
-    var selectedMeeting: Meeting? {
-        guard let selectedMeetingID else { return nil }
-        return meetings.first { $0.id == selectedMeetingID }
+    func meeting(id: Meeting.ID) -> Meeting? {
+        meetings.first { $0.id == id }
+    }
+
+    /// Opens a meeting with the list behind it, so Back lands on Meetings
+    /// rather than wherever the meeting came from.
+    func show(_ id: Meeting.ID) {
+        path = [.meetings, .meeting(id)]
     }
 
     var locale: Locale { Locale(identifier: localeIdentifier) }
@@ -278,13 +292,13 @@ final class AppModel {
         return meeting
     }
 
-    /// Shows freshly imported meetings, selects the first, and processes them.
+    /// Shows freshly imported meetings, opens the first, and processes them.
     private func add(_ imported: [Meeting]) {
         guard !imported.isEmpty else { return }
 
         meetings.insert(contentsOf: imported, at: 0)
         meetings.sort { $0.createdAt > $1.createdAt }
-        selectedMeetingID = imported.first?.id
+        if let first = imported.first { show(first.id) }
         for meeting in imported { startProcessing(meeting.id) }
     }
 
@@ -561,7 +575,7 @@ final class AppModel {
         tasks[id] = nil
         progress[id] = nil
         meetings.removeAll { $0.id == id }
-        if selectedMeetingID == id { selectedMeetingID = meetings.first?.id }
+        path.removeAll { $0 == .meeting(id) }
         Task { try? await store.delete(id: id) }
     }
 

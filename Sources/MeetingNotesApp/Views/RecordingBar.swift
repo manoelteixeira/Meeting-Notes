@@ -54,9 +54,10 @@ struct RecordingBar: View {
     }
 }
 
-private struct LevelMeter: View {
+struct LevelMeter: View {
     let systemImage: String
     let level: Double
+    var width: CGFloat = 70
 
     var body: some View {
         HStack(spacing: 5) {
@@ -67,7 +68,7 @@ private struct LevelMeter: View {
             Gauge(value: level) { EmptyView() }
                 .gaugeStyle(.linearCapacity)
                 .tint(level > 0.95 ? .red : .green)
-                .frame(width: 70)
+                .frame(width: width)
                 .animation(.linear(duration: 1.0 / 15), value: level)
         }
     }

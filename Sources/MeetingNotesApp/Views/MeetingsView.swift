@@ -1,65 +1,74 @@
 import MeetingNotesCore
 import SwiftUI
 
-struct MeetingSidebar: View {
+struct MeetingsView: View {
     @Bindable var model: AppModel
-    @Binding var isImporting: Bool
+    @State private var searchText = ""
     @State private var renamingID: UUID?
     @State private var draftTitle = ""
 
+    private var filtered: [Meeting] {
+        guard !searchText.isEmpty else { return model.meetings }
+        return model.meetings.filter { $0.title.localizedCaseInsensitiveContains(searchText) }
+    }
+
+    /// "This Week" and "Earlier", leaving out whichever is empty.
+    private var sections: [(title: String, meetings: [Meeting])] {
+        let calendar = Calendar.current
+        let (recent, earlier) = filtered.reduce(into: ([Meeting](), [Meeting]())) { groups, meeting in
+            if calendar.isDate(meeting.createdAt, equalTo: .now, toGranularity: .weekOfYear) {
+                groups.0.append(meeting)
+            } else {
+                groups.1.append(meeting)
+            }
+        }
+        return [("This Week", recent), ("Earlier", earlier)].filter { !$0.1.isEmpty }
+    }
+
     var body: some View {
-        List(selection: $model.selectedMeetingID) {
-            ForEach(model.meetings) { meeting in
-                MeetingRow(
-                    meeting: meeting,
-                    progress: model.progress[meeting.id]
-                )
-                .tag(meeting.id)
-                .contextMenu {
-                    Button("Rename…") {
-                        draftTitle = meeting.title
-                        renamingID = meeting.id
+        List {
+            ForEach(sections, id: \.title) { section in
+                Section(section.title) {
+                    ForEach(section.meetings) { meeting in
+                        NavigationLink(value: Route.meeting(meeting.id)) {
+                            MeetingRow(meeting: meeting, progress: model.progress[meeting.id])
+                        }
+                        .contextMenu {
+                            Button("Rename…") {
+                                draftTitle = meeting.title
+                                renamingID = meeting.id
+                            }
+                            Button("Reprocess") { model.reprocess(meeting.id) }
+                                .disabled(model.progress[meeting.id] != nil)
+                            Divider()
+                            Button("Delete", role: .destructive) { model.delete(meeting.id) }
+                        }
                     }
-                    Button("Reprocess") { model.reprocess(meeting.id) }
-                        .disabled(model.progress[meeting.id] != nil)
-                    Divider()
-                    Button("Delete", role: .destructive) { model.delete(meeting.id) }
                 }
             }
         }
-        .listStyle(.sidebar)
+        .listStyle(.inset)
+        .frame(maxWidth: .readableWidth)
+        .frame(maxWidth: .infinity)
+        .searchable(text: $searchText, placement: .toolbar)
         .navigationTitle("Meetings")
-        .toolbar {
-            ToolbarItem {
-                if model.recording.isRecording {
-                    Button {
-                        Task { await model.stopRecording() }
-                    } label: {
-                        Label("Stop Recording", systemImage: "stop.circle.fill")
-                    }
-                    .tint(.red)
-                    .help("Stop recording and process the meeting")
-                } else {
-                    Button {
-                        Task { await model.startRecording() }
-                    } label: {
-                        Label("Record Meeting", systemImage: "record.circle")
-                    }
-                    .help("Record the microphone and, optionally, the call's audio")
-                }
-            }
-            ToolbarItem {
-                Button {
-                    isImporting = true
-                } label: {
-                    Label("Import Recording", systemImage: "plus")
-                }
-                .help("Import an audio recording")
-            }
-        }
         .overlay {
             if model.meetings.isEmpty {
-                ContentUnavailableView("No meetings yet", systemImage: "tray")
+                ContentUnavailableView {
+                    Label("No meetings yet", systemImage: "tray")
+                } description: {
+                    Text("Record a meeting or import a recording to get started.")
+                } actions: {
+                    HStack {
+                        Button("Record Meeting", systemImage: "record.circle") {
+                            model.path.append(.record)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        Button("Import Recording…") { model.path.append(.importRecording) }
+                    }
+                }
+            } else if filtered.isEmpty {
+                ContentUnavailableView.search(text: searchText)
             }
         }
         .sheet(isPresented: Binding(get: { renamingID != nil }, set: { if !$0 { renamingID = nil } })) {
@@ -78,20 +87,27 @@ private struct MeetingRow: View {
     let progress: MeetingProgress?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Text(meeting.title)
-                .lineLimit(1)
-            HStack(spacing: 6) {
-                Text(meeting.createdAt, format: .dateTime.month().day().hour().minute())
-                Text("·")
-                Text(MarkdownExporter.timestamp(meeting.duration))
+        HStack(spacing: 16) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(meeting.title)
+                    .font(.body.weight(.medium))
+                    .lineLimit(1)
+                HStack(spacing: 6) {
+                    Text(meeting.createdAt, format: .dateTime.month().day().hour().minute())
+                    Text("·")
+                    Text(MarkdownExporter.timestamp(meeting.duration))
+                    if !meeting.speakers.isEmpty {
+                        Text("·")
+                        Text(meeting.speakers.count == 1 ? "1 speaker" : "\(meeting.speakers.count) speakers")
+                    }
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
             }
-            .font(.caption)
-            .foregroundStyle(.secondary)
-
+            Spacer(minLength: 8)
             StatusBadge(status: meeting.status, progress: progress)
         }
-        .padding(.vertical, 2)
+        .padding(.vertical, 6)
     }
 }
 
