@@ -127,7 +127,7 @@ struct SpeakerRecognizerTests {
 
         let alpha: Float = 0.9
         let expected = zip(old, fresh).map { alpha * $0 + (1 - alpha) * $1 }
-        #expect(outcome.people[0].embedding == expected)
+        #expect(outcome.people[0].voiceprints == [expected])
     }
 
     @Test("New people carry the injected id, creation time, and meeting date")
@@ -147,7 +147,7 @@ struct SpeakerRecognizerTests {
         #expect(enrolled.id == UUID(uuidString: "00000000-0000-0000-0000-000000000001"))
         #expect(enrolled.createdAt == now)
         #expect(enrolled.lastHeardAt == meetingDate)
-        #expect(enrolled.embedding == reference)
+        #expect(enrolled.voiceprints == [reference])
     }
 
     @Test("Brief speakers are ignored — neither matched nor enrolled")
@@ -196,5 +196,117 @@ struct SpeakerRecognizerTests {
         )
 
         #expect(outcome.people[0].lastHeardAt == recent)
+    }
+
+    // MARK: - Several voiceprints
+
+    /// The same person heard under two very different conditions.
+    private let laptop: [Float] = [1, 0]
+    private let headset: [Float] = [0, 1]
+
+    @Test("A voice near any one of a person's voiceprints matches them")
+    func matchesNearestVoiceprint() {
+        let priya = Person(name: "Priya", voiceprints: [laptop, headset], lastHeardAt: .distantPast)
+        let outcome = SpeakerRecognizer.recognize(
+            embeddings: ["S1": [0.1, 1]],
+            speakingTime: ampleTime,
+            people: [priya],
+            meetingDate: Date()
+        )
+
+        #expect(outcome.assignments == [
+            .init(runSpeakerID: "S1", personID: priya.id, personName: "Priya", isNewPerson: false)
+        ])
+    }
+
+    @Test("A match blends into the nearest voiceprint only")
+    func blendsNearestVoiceprintOnly() {
+        let fresh: [Float] = [0.1, 1]
+        let priya = Person(name: "Priya", voiceprints: [laptop, headset], lastHeardAt: .distantPast)
+        let outcome = SpeakerRecognizer.recognize(
+            embeddings: ["S1": fresh],
+            speakingTime: ampleTime,
+            people: [priya],
+            meetingDate: Date()
+        )
+
+        let alpha: Float = 0.9
+        let expected = zip(headset, fresh).map { alpha * $0 + (1 - alpha) * $1 }
+        #expect(outcome.people[0].voiceprints == [laptop, expected])
+    }
+
+    @Test("Two run speakers near different voiceprints still cannot share a person")
+    func voiceprintsKeepMatchingOneToOne() {
+        let priya = Person(name: "Priya", voiceprints: [laptop, headset], lastHeardAt: .distantPast)
+        let outcome = SpeakerRecognizer.recognize(
+            embeddings: ["S1": [1, 0.05], "S2": [0.3, 1]],
+            speakingTime: ampleTime,
+            people: [priya],
+            meetingDate: Date(),
+            idGenerator: sequentialIDs()
+        )
+
+        // S1 is the closer pair, so it takes Priya; S2 is someone new.
+        #expect(outcome.assignments.map(\.runSpeakerID) == ["S1", "S2"])
+        #expect(outcome.assignments[0].personID == priya.id)
+        #expect(outcome.assignments[1].isNewPerson)
+        #expect(outcome.people.count == 2)
+    }
+
+    @Test("A voiceprint of another dimension is skipped while a comparable one matches")
+    func mismatchedVoiceprintIsSkipped() {
+        let stale: [Float] = [1, 0, 0]
+        let priya = Person(name: "Priya", voiceprints: [stale, laptop], lastHeardAt: .distantPast)
+        let outcome = SpeakerRecognizer.recognize(
+            embeddings: ["S1": [1, 0.01]],
+            speakingTime: ampleTime,
+            people: [priya],
+            meetingDate: Date()
+        )
+
+        #expect(outcome.assignments.first?.personID == priya.id)
+        #expect(outcome.people[0].voiceprints[0] == stale)
+    }
+
+    // MARK: - Merging
+
+    @Test("Merging keeps both records' voiceprints, the target's name, and spans the dates")
+    func mergeCombinesRecords() {
+        let target = Person(
+            name: "Priya",
+            embedding: laptop,
+            createdAt: Date(timeIntervalSince1970: 200),
+            lastHeardAt: Date(timeIntervalSince1970: 300)
+        )
+        let source = Person(
+            name: "P.",
+            embedding: headset,
+            createdAt: Date(timeIntervalSince1970: 100),
+            lastHeardAt: Date(timeIntervalSince1970: 900)
+        )
+        let merged = SpeakerRecognizer.merge(source, into: target)
+
+        #expect(merged.id == target.id)
+        #expect(merged.name == "Priya")
+        #expect(merged.voiceprints == [laptop, headset])
+        #expect(merged.createdAt == Date(timeIntervalSince1970: 100))
+        #expect(merged.lastHeardAt == Date(timeIntervalSince1970: 900))
+    }
+
+    @Test("An unnamed target takes the source's name")
+    func mergeAdoptsSourceName() {
+        let target = Person(embedding: laptop, lastHeardAt: .distantPast)
+        let source = Person(name: "Priya", embedding: headset, lastHeardAt: .distantPast)
+
+        #expect(SpeakerRecognizer.merge(source, into: target).name == "Priya")
+    }
+
+    @Test("Past the cap, the two most similar voiceprints are fused")
+    func mergeFusesClosestPastCap() {
+        let target = Person(embedding: laptop, lastHeardAt: .distantPast)
+        let source = Person(voiceprints: [[1, 0.1], headset], lastHeardAt: .distantPast)
+        let merged = SpeakerRecognizer.merge(source, into: target, maxVoiceprints: 2)
+
+        #expect(merged.voiceprints == [[1, 0.05], headset])
     }
 }

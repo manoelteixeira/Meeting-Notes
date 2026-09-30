@@ -61,8 +61,10 @@ struct SpeakersSettingsView: View {
             } footer: {
                 Text(
                     "Renaming here renames the person in every meeting their "
-                        + "voice was recognized in. Deleting a voice keeps the "
-                        + "names meetings already show."
+                        + "voice was recognized in. If one person shows up twice "
+                        + "— say, after a new microphone — merge them so both "
+                        + "voiceprints are recognized. Deleting a voice keeps "
+                        + "the names meetings already show."
                 )
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -70,12 +72,14 @@ struct SpeakersSettingsView: View {
         }
         .formStyle(.grouped)
         .padding(.top, 8)
+        .mergeSuggestionDialog(model: model, origin: .settings)
         .task { await model.refreshPeople() }
     }
 }
 
-/// One known voice: an editable name, where it was last heard, and a forget
-/// button — macOS has no swipe-to-delete, so removal needs a visible affordance.
+/// One known voice: an editable name, where it was last heard, a merge menu,
+/// and a forget button — macOS has no swipe-to-delete, so removal needs a
+/// visible affordance.
 private struct PersonRow: View {
     @Bindable var model: AppModel
     let person: Person
@@ -96,12 +100,28 @@ private struct PersonRow: View {
                     prompt: Text("Unnamed speaker")
                 )
                 .textFieldStyle(.plain)
-                .onSubmit { model.renamePerson(person.id, to: draft) }
+                .onSubmit { model.renamePerson(person.id, to: draft, from: .settings) }
 
                 Text(caption)
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+
+            Menu {
+                ForEach(others) { other in
+                    Button(other.name ?? "Unnamed speaker") {
+                        model.proposeMerge(person.id, into: other.id, from: .settings)
+                    }
+                }
+            } label: {
+                Image(systemName: "arrow.triangle.merge")
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .disabled(others.isEmpty)
+            .help("Merge into another voice")
+            .accessibilityLabel("Merge into another voice")
 
             Button {
                 model.deletePerson(person.id)
@@ -113,12 +133,22 @@ private struct PersonRow: View {
         }
     }
 
+    /// Everyone this voice could be merged into, named people first.
+    private var others: [Person] {
+        model.people
+            .filter { $0.id != person.id }
+            .sorted { ($0.name ?? "\u{10FFFF}") < ($1.name ?? "\u{10FFFF}") }
+    }
+
     private var caption: String {
         let count = model.meetingsCount(for: person.id)
         let meetings = count == 1 ? "1 meeting" : "\(count) meetings"
+        let prints = person.voiceprints.count > 1
+            ? " · \(person.voiceprints.count) voiceprints"
+            : ""
         let heard = person.lastHeardAt.formatted(
             .relative(presentation: .named, unitsStyle: .wide)
         )
-        return "\(meetings) · last heard \(heard)"
+        return "\(meetings)\(prints) · last heard \(heard)"
     }
 }

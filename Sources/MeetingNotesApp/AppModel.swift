@@ -22,6 +22,25 @@ struct AppAlert: Identifiable, Equatable {
     var message: String
 }
 
+/// A proposal to fold one known voice into another, awaiting confirmation.
+struct MergeSuggestion: Identifiable, Equatable {
+    /// Which window asked, so only that one shows the confirmation.
+    enum Origin { case main, settings }
+
+    let id = UUID()
+    /// The record that goes away; its voiceprints move to `targetID`.
+    var sourceID: UUID
+    var targetID: UUID
+    /// The target's name, or "Unnamed speaker", for the dialog text.
+    var targetName: String
+    /// True when a rename gave the source the target's name, rather than the
+    /// user picking "Merge into…".
+    var fromRename: Bool
+    /// Both were heard as separate speakers in one meeting — likely two people.
+    var heardTogether: Bool
+    var origin: Origin
+}
+
 /// A screen the window can navigate to from Home.
 enum Route: Hashable {
     case meetings
@@ -45,6 +64,8 @@ final class AppModel {
     var path: [Route] = []
     private(set) var progress: [UUID: MeetingProgress] = [:]
     var alert: AppAlert?
+    /// A merge waiting on the user's confirmation, if any.
+    var mergeSuggestion: MergeSuggestion?
 
     private(set) var supportedLocales: [Locale] = []
     private(set) var speechModelStatus: SpeechModelAvailability = .supported
@@ -514,9 +535,24 @@ final class AppModel {
 
     /// Renames a person everywhere: the directory (so future meetings pick the
     /// name up) and every meeting their voice was recognized in.
-    func renamePerson(_ personID: UUID, to name: String) {
+    ///
+    /// If another known voice already goes by that name, the user is offered
+    /// a merge: renaming a duplicate after its real owner is how a voice
+    /// heard through a new mic or room usually gets fixed.
+    func renamePerson(
+        _ personID: UUID,
+        to name: String,
+        from origin: MergeSuggestion.Origin = .main
+    ) {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
+        if let namesake = people.first(where: {
+            $0.id != personID && Self.sameName($0.name, trimmed)
+        }) {
+            mergeSuggestion = suggestion(
+                merging: personID, into: namesake, fromRename: true, origin: origin
+            )
+        }
         Task {
             try? await directory.rename(id: personID, to: trimmed)
             await refreshPeople()
@@ -533,6 +569,81 @@ final class AppModel {
                 Task { try? await store.save(snapshot) }
             }
         }
+    }
+
+    /// Offers to fold `sourceID` into `targetID`; the dialog calls `mergePeople`.
+    func proposeMerge(
+        _ sourceID: UUID,
+        into targetID: UUID,
+        from origin: MergeSuggestion.Origin
+    ) {
+        guard let target = people.first(where: { $0.id == targetID }) else { return }
+        mergeSuggestion = suggestion(
+            merging: sourceID, into: target, fromRename: false, origin: origin
+        )
+    }
+
+    /// Folds one voice into another: the directory keeps both voiceprints
+    /// under the target, and every meeting speaker linked to the source is
+    /// relinked to the target and takes its name.
+    func mergePeople(_ sourceID: UUID, into targetID: UUID) {
+        Task {
+            let merged: Person?
+            do {
+                merged = try await directory.merge(sourceID: sourceID, into: targetID)
+            } catch {
+                alert = AppAlert(title: "Merge failed", message: error.localizedDescription)
+                return
+            }
+            await refreshPeople()
+            guard let merged else { return }
+            for index in meetings.indices {
+                var changed = false
+                for speakerIndex in meetings[index].speakers.indices
+                where meetings[index].speakers[speakerIndex].personID == sourceID {
+                    meetings[index].speakers[speakerIndex].personID = merged.id
+                    if let name = merged.name {
+                        meetings[index].speakers[speakerIndex].displayName = name
+                    }
+                    changed = true
+                }
+                if changed {
+                    let snapshot = meetings[index]
+                    Task { try? await store.save(snapshot) }
+                }
+            }
+        }
+    }
+
+    /// Whether some meeting has speakers linked to both people. The diarizer
+    /// told those voices apart side by side, so they are probably not one person.
+    func heardTogether(_ first: UUID, _ second: UUID) -> Bool {
+        meetings.contains { meeting in
+            let linked = Set(meeting.speakers.compactMap(\.personID))
+            return linked.contains(first) && linked.contains(second)
+        }
+    }
+
+    private func suggestion(
+        merging sourceID: UUID,
+        into target: Person,
+        fromRename: Bool,
+        origin: MergeSuggestion.Origin
+    ) -> MergeSuggestion {
+        MergeSuggestion(
+            sourceID: sourceID,
+            targetID: target.id,
+            targetName: target.name ?? "Unnamed speaker",
+            fromRename: fromRename,
+            heardTogether: heardTogether(sourceID, target.id),
+            origin: origin
+        )
+    }
+
+    private static func sameName(_ name: String?, _ other: String) -> Bool {
+        guard let name else { return false }
+        return name.trimmingCharacters(in: .whitespacesAndNewlines)
+            .compare(other, options: [.caseInsensitive, .diacriticInsensitive]) == .orderedSame
     }
 
     /// Forgets a voice. Meetings keep the name text they show, but the links

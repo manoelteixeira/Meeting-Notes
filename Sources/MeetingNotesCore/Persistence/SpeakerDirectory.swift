@@ -53,6 +53,22 @@ public actor SpeakerDirectory {
         try persist()
     }
 
+    /// Folds one person into another and forgets the source. Unknown ids and
+    /// merging a person into themselves are no-ops returning nil, for the
+    /// same reason as `rename`: a merge racing a delete must not resurrect anyone.
+    @discardableResult
+    public func merge(sourceID: UUID, into targetID: UUID) throws -> Person? {
+        guard sourceID != targetID,
+              let source = roster.first(where: { $0.id == sourceID }),
+              let targetIndex = roster.firstIndex(where: { $0.id == targetID })
+        else { return nil }
+        let merged = SpeakerRecognizer.merge(source, into: roster[targetIndex])
+        roster[targetIndex] = merged
+        roster.removeAll { $0.id == sourceID }
+        try persist()
+        return merged
+    }
+
     public func deleteAll() throws {
         roster = []
         try persist()

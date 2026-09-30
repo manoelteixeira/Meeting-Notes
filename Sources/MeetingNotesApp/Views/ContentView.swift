@@ -43,6 +43,7 @@ struct ContentView: View {
         } message: { alert in
             Text(alert.message)
         }
+        .mergeSuggestionDialog(model: model, origin: .main)
     }
 
     @ViewBuilder

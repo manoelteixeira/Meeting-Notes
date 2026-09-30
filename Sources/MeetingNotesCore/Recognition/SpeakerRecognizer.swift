@@ -77,19 +77,28 @@ public enum SpeakerRecognizer {
         // best-first: the closest pair wins, and once either side is taken the
         // rest of its pairs are dead. That keeps assignments unique in both
         // directions — two run speakers can never collapse onto one person.
+        // A person's distance is that of their nearest voiceprint: each one
+        // stands for the voice under one set of conditions (mic, room), and
+        // matching any of them is hearing that person.
         struct Pair {
             let candidate: String
             let personIndex: Int
+            let printIndex: Int
             let distance: Float
         }
         var pairs: [Pair] = []
         for candidate in candidates {
             let embedding = embeddings[candidate]!
             for (index, person) in people.enumerated() {
-                guard person.embedding.count == embedding.count else { continue }
-                let distance = SpeakerUtilities.cosineDistance(embedding, person.embedding)
-                guard distance.isFinite, distance < config.matchThreshold else { continue }
-                pairs.append(Pair(candidate: candidate, personIndex: index, distance: distance))
+                let nearest = person.voiceprints.indices
+                    .filter { person.voiceprints[$0].count == embedding.count }
+                    .map { ($0, SpeakerUtilities.cosineDistance(embedding, person.voiceprints[$0])) }
+                    .filter { $0.1.isFinite }
+                    .min { $0.1 < $1.1 }
+                guard let (printIndex, distance) = nearest, distance < config.matchThreshold else { continue }
+                pairs.append(
+                    Pair(candidate: candidate, personIndex: index, printIndex: printIndex, distance: distance)
+                )
             }
         }
         pairs.sort {
@@ -109,8 +118,10 @@ public enum SpeakerRecognizer {
             takenPeople.insert(pair.personIndex)
 
             var person = updated[pair.personIndex]
+            // Only the voiceprint that matched drifts toward this meeting, so
+            // the headset voice never bleeds into the laptop-mic one.
             let fresh = embeddings[pair.candidate]!
-            person.embedding = zip(person.embedding, fresh).map {
+            person.voiceprints[pair.printIndex] = zip(person.voiceprints[pair.printIndex], fresh).map {
                 config.emaAlpha * $0 + (1 - config.emaAlpha) * $1
             }
             person.lastHeardAt = max(person.lastHeardAt, meetingDate)
@@ -147,5 +158,45 @@ public enum SpeakerRecognizer {
 
         assignments.sort { $0.runSpeakerID < $1.runSpeakerID }
         return Outcome(assignments: assignments, people: updated)
+    }
+
+    /// Folds `source` into `target`: one person with both records' voiceprints.
+    ///
+    /// This is how a voice recognized under one set of conditions comes to be
+    /// recognized under another — the duplicate a missed match enrolled
+    /// brings its voiceprint along. Past `maxVoiceprints`, the two most
+    /// similar voiceprints are averaged into one, keeping the most distinct
+    /// conditions. The target's name wins, and the dates span both records.
+    public static func merge(
+        _ source: Person,
+        into target: Person,
+        maxVoiceprints: Int = Person.maxVoiceprints
+    ) -> Person {
+        var merged = target
+        merged.name = target.name ?? source.name
+        merged.createdAt = min(target.createdAt, source.createdAt)
+        merged.lastHeardAt = max(target.lastHeardAt, source.lastHeardAt)
+
+        var prints = (target.voiceprints + source.voiceprints).filter { !$0.isEmpty }
+        while prints.count > max(maxVoiceprints, 1) {
+            var closest: (i: Int, j: Int, distance: Float)?
+            for i in prints.indices {
+                for j in prints.indices where j > i && prints[i].count == prints[j].count {
+                    let distance = SpeakerUtilities.cosineDistance(prints[i], prints[j])
+                    if distance.isFinite, closest.map({ distance < $0.distance }) ?? true {
+                        closest = (i, j, distance)
+                    }
+                }
+            }
+            // Nothing comparable to fuse: drop the oldest-merged extras.
+            guard let (i, j, _) = closest else {
+                prints.removeLast(prints.count - max(maxVoiceprints, 1))
+                break
+            }
+            prints[i] = zip(prints[i], prints[j]).map { ($0 + $1) / 2 }
+            prints.remove(at: j)
+        }
+        merged.voiceprints = prints
+        return merged
     }
 }
