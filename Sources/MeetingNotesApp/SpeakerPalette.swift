@@ -14,3 +14,15 @@ enum SpeakerPalette {
         return colors[1 + (max(0, speaker.colorIndex - 1) % (colors.count - 1))]
     }
 }
+
+extension Meeting {
+    /// A speaker's name for menus, with when they first speak added if another
+    /// speaker shares the name — a split voice shows up as twin names.
+    func menuLabel(for speaker: Speaker) -> String {
+        let twins = speakers.contains { $0.id != speaker.id && $0.displayName == speaker.displayName }
+        guard twins, let first = transcript.first(where: { $0.speakerID == speaker.id }) else {
+            return speaker.displayName
+        }
+        return "\(speaker.displayName) (from \(MarkdownExporter.timestamp(first.start)))"
+    }
+}

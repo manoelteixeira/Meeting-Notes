@@ -18,6 +18,9 @@ struct TranscriptView: View {
                         UtteranceRow(
                             segment: segment,
                             speaker: meeting.speaker(id: segment.speakerID),
+                            otherSpeakers: meeting.speakers
+                                .filter { !$0.isUnknown && $0.id != segment.speakerID }
+                                .map { ($0, meeting.menuLabel(for: $0)) },
                             isTrailing: isTrailing(segment.speakerID),
                             showsHeader: index == 0
                                 || meeting.transcript[index - 1].speakerID != segment.speakerID,
@@ -26,6 +29,12 @@ struct TranscriptView: View {
                                 && player.isPlaying,
                             onRename: { name in
                                 model.renameSpeaker(segment.speakerID, in: meeting.id, to: name)
+                            },
+                            onMerge: { targetID in
+                                model.mergeSpeaker(segment.speakerID, into: targetID, in: meeting.id)
+                            },
+                            onAssign: { speakerID in
+                                model.reassignSegment(segment.id, to: speakerID, in: meeting.id)
                             },
                             onSeek: {
                                 player.seek(to: segment.start)
@@ -97,11 +106,15 @@ struct TranscriptView: View {
 private struct UtteranceRow: View {
     let segment: TranscriptSegment
     let speaker: Speaker?
+    /// The meeting's other named speakers, to merge into or assign this line to.
+    let otherSpeakers: [(speaker: Speaker, label: String)]
     let isTrailing: Bool
     let showsHeader: Bool
     let isCurrent: Bool
     let isSoloPlaying: Bool
     let onRename: (String) -> Void
+    let onMerge: (String) -> Void
+    let onAssign: (String) -> Void
     let onSeek: () -> Void
     let onPlaySection: () -> Void
     let onEditText: (String) -> Void
@@ -135,6 +148,13 @@ private struct UtteranceRow: View {
             Button("Edit Text") { beginEditing() }
             Button("Play This Section") { onPlaySection() }
             Button("Play from Here") { onSeek() }
+            if !otherSpeakers.isEmpty {
+                Menu("Assign to") {
+                    ForEach(otherSpeakers, id: \.speaker.id) { other in
+                        Button(other.label) { onAssign(other.speaker.id) }
+                    }
+                }
+            }
         }
     }
 
@@ -165,8 +185,11 @@ private struct UtteranceRow: View {
         .help("Rename this speaker")
         .disabled(speaker == nil || speaker?.isUnknown == true)
         .popover(isPresented: $isRenaming) {
-            SpeakerRenamePopover(name: $draftName) {
+            SpeakerRenamePopover(name: $draftName, otherSpeakers: otherSpeakers) {
                 onRename(draftName)
+                isRenaming = false
+            } onMerge: { targetID in
+                onMerge(targetID)
                 isRenaming = false
             }
         }
@@ -254,7 +277,9 @@ private struct UtteranceRow: View {
 
 private struct SpeakerRenamePopover: View {
     @Binding var name: String
+    let otherSpeakers: [(speaker: Speaker, label: String)]
     let onCommit: () -> Void
+    let onMerge: (String) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -265,7 +290,40 @@ private struct SpeakerRenamePopover: View {
                 .onSubmit(onCommit)
             Button("Rename", action: onCommit)
                 .keyboardShortcut(.defaultAction)
+            if !otherSpeakers.isEmpty {
+                Divider()
+                Text("Same person as").font(.caption).foregroundStyle(.secondary)
+                // Merge, rather than rename, when the diarizer split one voice:
+                // every line moves to the chosen speaker.
+                MergeTargetList(targets: otherSpeakers, onSelect: onMerge)
+            }
         }
         .padding(14)
+    }
+}
+
+/// The meeting's other speakers as chips, each a merge target.
+private struct MergeTargetList: View {
+    let targets: [(speaker: Speaker, label: String)]
+    let onSelect: (String) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            ForEach(targets, id: \.speaker.id) { target in
+                let speaker = target.speaker
+                Button {
+                    onSelect(speaker.id)
+                } label: {
+                    Text(target.label)
+                        .font(.caption.weight(.semibold))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3)
+                        .background(SpeakerPalette.color(for: speaker).opacity(0.18), in: Capsule())
+                        .foregroundStyle(SpeakerPalette.color(for: speaker))
+                }
+                .buttonStyle(.plain)
+                .help("Merge this speaker into \(speaker.displayName)")
+            }
+        }
     }
 }

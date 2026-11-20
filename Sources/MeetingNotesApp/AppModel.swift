@@ -41,6 +41,17 @@ struct MergeSuggestion: Identifiable, Equatable {
     var origin: Origin
 }
 
+/// A proposal to fold one speaker of a meeting into another after a rename
+/// gave both the same name, awaiting confirmation.
+struct SpeakerMergeSuggestion: Identifiable, Equatable {
+    let id = UUID()
+    var meetingID: UUID
+    /// The speaker that goes away; its utterances move to `targetID`.
+    var sourceID: String
+    var targetID: String
+    var targetName: String
+}
+
 /// A screen the window can navigate to from Home.
 enum Route: Hashable {
     case meetings
@@ -66,6 +77,8 @@ final class AppModel {
     var alert: AppAlert?
     /// A merge waiting on the user's confirmation, if any.
     var mergeSuggestion: MergeSuggestion?
+    /// A same-meeting speaker merge waiting on the user's confirmation, if any.
+    var speakerMergeSuggestion: SpeakerMergeSuggestion?
 
     private(set) var supportedLocales: [Locale] = []
     private(set) var speechModelStatus: SpeechModelAvailability = .supported
@@ -493,8 +506,26 @@ final class AppModel {
     func renameSpeaker(_ speakerID: String, in meetingID: UUID, to name: String) {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        if let personID = meetings.first(where: { $0.id == meetingID })?
-            .speaker(id: speakerID)?.personID {
+        let meeting = meetings.first(where: { $0.id == meetingID })
+        if let namesake = meeting?.speakers.first(where: {
+            $0.id != speakerID && !$0.isUnknown && Self.sameName($0.displayName, trimmed)
+        }) {
+            // Another voice in this very meeting already has the name: most
+            // likely the diarizer split one person in two. Merging the speakers
+            // also merges their people, so skip the person-level offer.
+            speakerMergeSuggestion = SpeakerMergeSuggestion(
+                meetingID: meetingID,
+                sourceID: speakerID,
+                targetID: namesake.id,
+                targetName: namesake.displayName
+            )
+            update(meetingID) { meeting in
+                guard let index = meeting.speakers.firstIndex(where: { $0.id == speakerID }) else { return }
+                meeting.speakers[index].displayName = trimmed
+            }
+            return
+        }
+        if let personID = meeting?.speaker(id: speakerID)?.personID {
             // A recognized voice: the name belongs to the person, everywhere.
             renamePerson(personID, to: trimmed)
         } else {
@@ -503,6 +534,27 @@ final class AppModel {
                 meeting.speakers[index].displayName = trimmed
             }
         }
+    }
+
+    /// Folds one speaker of a meeting into another. When both voices are
+    /// linked to different people, the people are merged too — the user just
+    /// said they are one voice — so other meetings they were heard in follow.
+    func mergeSpeaker(_ sourceID: String, into targetID: String, in meetingID: UUID) {
+        guard let meeting = meetings.first(where: { $0.id == meetingID }),
+              let source = meeting.speaker(id: sourceID),
+              let target = meeting.speaker(id: targetID)
+        else { return }
+        update(meetingID) { $0.mergeSpeaker(sourceID, into: targetID) }
+        if let sourcePerson = source.personID,
+           let targetPerson = target.personID,
+           sourcePerson != targetPerson {
+            mergePeople(sourcePerson, into: targetPerson)
+        }
+    }
+
+    /// Attributes one utterance to another speaker. Voiceprints are untouched.
+    func reassignSegment(_ segmentID: UUID, to speakerID: String, in meetingID: UUID) {
+        update(meetingID) { $0.reassignSegment(segmentID, to: speakerID) }
     }
 
     /// Corrects one utterance's text, e.g. after hearing the audio disagree.
@@ -608,6 +660,8 @@ final class AppModel {
                     changed = true
                 }
                 if changed {
+                    // Speakers the diarizer split now share a person: show them as one.
+                    meetings[index].collapseSpeakersSharingPerson()
                     let snapshot = meetings[index]
                     Task { try? await store.save(snapshot) }
                 }

@@ -66,4 +66,53 @@ public struct Meeting: Codable, Sendable, Equatable, Identifiable {
     public func displayName(forSpeaker id: String) -> String {
         speaker(id: id)?.displayName ?? "Unknown speaker"
     }
+
+    // MARK: - Speaker corrections
+
+    /// Folds one speaker into another after the diarizer split a single voice:
+    /// every utterance moves to `targetID`, which keeps its name and colour and
+    /// inherits the source's person link if it had none.
+    public mutating func mergeSpeaker(_ sourceID: String, into targetID: String) {
+        guard sourceID != targetID,
+              sourceID != Speaker.unknownID, targetID != Speaker.unknownID,
+              let source = speaker(id: sourceID),
+              let targetIndex = speakers.firstIndex(where: { $0.id == targetID })
+        else { return }
+        for index in transcript.indices where transcript[index].speakerID == sourceID {
+            transcript[index].speakerID = targetID
+        }
+        if speakers[targetIndex].personID == nil {
+            speakers[targetIndex].personID = source.personID
+        }
+        speakers.removeAll { $0.id == sourceID }
+    }
+
+    /// Attributes one utterance to a different speaker. A speaker left with no
+    /// utterances is dropped so its chip disappears.
+    public mutating func reassignSegment(_ segmentID: UUID, to speakerID: String) {
+        guard speaker(id: speakerID) != nil,
+              let index = transcript.firstIndex(where: { $0.id == segmentID })
+        else { return }
+        let previous = transcript[index].speakerID
+        guard previous != speakerID else { return }
+        transcript[index].speakerID = speakerID
+        if previous != Speaker.unknownID,
+           !transcript.contains(where: { $0.speakerID == previous }) {
+            speakers.removeAll { $0.id == previous }
+        }
+    }
+
+    /// Merges speakers linked to the same person into the first of them, as
+    /// happens once two split voices are merged in the speaker directory.
+    public mutating func collapseSpeakersSharingPerson() {
+        var firstForPerson: [UUID: String] = [:]
+        for speaker in speakers {
+            guard let personID = speaker.personID else { continue }
+            if let survivor = firstForPerson[personID] {
+                mergeSpeaker(speaker.id, into: survivor)
+            } else {
+                firstForPerson[personID] = speaker.id
+            }
+        }
+    }
 }

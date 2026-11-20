@@ -101,6 +101,18 @@ struct MeetingDetailView: View {
                         .padding(.vertical, 2)
                         .background(SpeakerPalette.color(for: speaker).opacity(0.16), in: Capsule())
                         .foregroundStyle(SpeakerPalette.color(for: speaker))
+                        .contextMenu {
+                            let others = meeting.speakers.filter { !$0.isUnknown && $0.id != speaker.id }
+                            if !others.isEmpty {
+                                Menu("Merge into") {
+                                    ForEach(others) { other in
+                                        Button(meeting.menuLabel(for: other)) {
+                                            model.mergeSpeaker(speaker.id, into: other.id, in: meeting.id)
+                                        }
+                                    }
+                                }
+                            }
+                        }
                 }
             }
             .font(.caption)

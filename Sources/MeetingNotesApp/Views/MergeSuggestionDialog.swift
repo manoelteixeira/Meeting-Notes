@@ -1,7 +1,8 @@
 import SwiftUI
 
 extension View {
-    /// Confirms a pending `MergeSuggestion` raised from `origin`'s window.
+    /// Confirms a pending `MergeSuggestion` raised from `origin`'s window, and
+    /// in the main window a pending `SpeakerMergeSuggestion`.
     ///
     /// The main window and Settings each attach this with their own origin,
     /// so a merge offered in one never pops up in the other.
@@ -37,6 +38,30 @@ private struct MergeSuggestionDialog: ViewModifier {
         } message: { suggestion in
             Text(message(for: suggestion))
         }
+        .confirmationDialog(
+            speakerSuggestion.map { "Another speaker here is already named \($0.targetName)" } ?? "",
+            isPresented: Binding(
+                get: { speakerSuggestion != nil },
+                set: { if !$0 { model.speakerMergeSuggestion = nil } }
+            ),
+            presenting: speakerSuggestion
+        ) { suggestion in
+            Button("Merge") {
+                model.mergeSpeaker(
+                    suggestion.sourceID, into: suggestion.targetID, in: suggestion.meetingID
+                )
+            }
+            Button("Keep Separate", role: .cancel) {}
+        } message: { suggestion in
+            Text("Merging moves every line of this speaker to \(suggestion.targetName), "
+                + "for when one voice was split into two.")
+        }
+    }
+
+    /// Same-meeting speaker merges come from the transcript, so only the main
+    /// window confirms them.
+    private var speakerSuggestion: SpeakerMergeSuggestion? {
+        origin == .main ? model.speakerMergeSuggestion : nil
     }
 
     private var title: String {
